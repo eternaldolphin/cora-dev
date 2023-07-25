@@ -1,3 +1,10 @@
+## 实验细节
+`--target_class_factor 1` 大概能涨2个点
+
+visualization
+```
+bash demo.sh
+```
 # CORA: Adapting CLIP for Open-Vocabulary Detection with Region Prompting and Anchor Pre-Matching
 
 This is the official PyTorch implementation of CORA (CVPR 2023).

@@ -88,7 +88,6 @@ def get_args_parser():
     parser.add_argument('--no_efficient_pooling', action='store_true')
     parser.add_argument('--use_efficient_pe_proj', action='store_true')
     parser.add_argument('--text_dim', default=1024, type=int)
-    parser.add_argument('--add_gn', action='store_true')
     parser.add_argument('--bg_threshold', default=-1.0, type=float)
     parser.add_argument('--class_oracle', action='store_true')
     parser.add_argument('--score_threshold', default=2.0, type=float)
@@ -161,10 +160,10 @@ def get_args_parser():
     parser.add_argument('--num_workers', default=2, type=int)
     parser.add_argument('--debug', action='store_true', 
                     help="For debug only. It will perform only a few steps during trainig and val.")
-    parser.add_argument('--label_version', default='', choices=['', 'RN50x4base', 'RN50x4base_coconames', 'RN50x4base_prev', 'RN50base', 'ori', 'custom'])
+    parser.add_argument('--label_version', default='', choices=['', 'RN50x4base', 'RN50x4base_coconames', 'RN50x4base_prev', 'RN50base', 'small_RN50base', 'tiny_RN50base', 'woperson', 'small_drop', 'ori', 'custom', 'fewshot', 'fewshot_new'])
     parser.add_argument('--num_label_sampled', default=-1, type=int)
-    
     parser.add_argument('--clip_aug', action='store_true')
+    parser.add_argument('--sam_proposal', action='store_true')
 
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
@@ -201,13 +200,22 @@ def main(args):
 
     model_ema = None
     if args.model_ema:
-        # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
-        model_ema = utils.fast_ema(
-            model,
-            decay=args.model_ema_decay,
-            device='',
-            resume='',
-            skip_keywords=['classifier', 'backbone'])
+        # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP 
+        # import ipdb;ipdb.set_trace()
+        if args.lr_backbone == 0.0:
+            model_ema = utils.fast_ema(
+                model,
+                decay=args.model_ema_decay,
+                device='',
+                resume='',
+                skip_keywords=['classifier', 'backbone'])
+        else:
+            model_ema = utils.fast_ema(
+                model,
+                decay=args.model_ema_decay,
+                device='',
+                resume='',
+                skip_keywords=['classifier', 'attn_pool', 'layer4'])
 
     def match_keywords(n, name_keywords):
         out = False
@@ -219,7 +227,7 @@ def main(args):
 
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('Total number of params in model: ', n_parameters)
@@ -231,8 +239,30 @@ def main(args):
                 out = True
                 break
         return out
-
-    param_dicts = [
+    if args.lr_backbone == 0.0:
+        param_dicts = [
+            {
+                "params":
+                    [p for n, p in model_without_ddp.named_parameters()
+                    if "backbone.0" not in n and not match_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
+                "lr": args.lr,
+            },
+            {
+                "params": [p for n, p in model_without_ddp.named_parameters()
+                        if "backbone.0" in n and p.requires_grad],
+                "lr": args.lr_backbone,
+            },
+            {
+                "params": [p for n, p in model_without_ddp.named_parameters()
+                        if match_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
+                "lr": args.lr * args.lr_linear_proj_mult,
+            }
+        ]
+    else:
+        for k, v in model.named_parameters():
+            if 'backbone.0.body.layer4' in k or 'backbone.0.attn_pool' in k:
+                v.requires_grad = False
+        param_dicts = [
         {
             "params":
                 [p for n, p in model_without_ddp.named_parameters()
@@ -250,7 +280,6 @@ def main(args):
             "lr": args.lr * args.lr_linear_proj_mult,
         }
     ]
-
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
     

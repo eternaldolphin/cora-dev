@@ -2,9 +2,9 @@ name=$0
 . configs/controller.sh
 
 args=" \
---coco_path $data_path \
+--coco_path 'data/coco' \
 --output_dir $work_dir \
---batch_size 4 \
+--batch_size 2 \
 --epochs 35 \
 --lr_drop 35 \
 --backbone clip_RN50 \

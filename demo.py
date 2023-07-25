@@ -47,40 +47,6 @@ def main(args):
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('Total number of params in model: ', n_parameters)
 
-    # def match_keywords(n, name_keywords):
-    #     out = False
-    #     for b in name_keywords:
-    #         if b in n:
-    #             out = True
-    #             break
-    #     return out
-
-    # param_dicts = [
-    #     {
-    #         "params":
-    #             [p for n, p in model_without_ddp.named_parameters()
-    #              if "backbone.0" not in n and not match_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
-    #         "lr": args.lr,
-    #     },
-    #     {
-    #         "params": [p for n, p in model_without_ddp.named_parameters()
-    #                    if "backbone.0" in n and p.requires_grad],
-    #         "lr": args.lr_backbone,
-    #     },
-    #     {
-    #         "params": [p for n, p in model_without_ddp.named_parameters()
-    #                    if match_keywords(n, args.lr_linear_proj_names) and p.requires_grad],
-    #         "lr": args.lr * args.lr_linear_proj_mult,
-    #     }
-    # ]
-
-    # optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
-    # lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
-
-    # if args.frozen_weights is not None:
-    #     checkpoint = torch.load(args.frozen_weights, map_location='cpu')
-    #     model_without_ddp.detr.load_state_dict(checkpoint['model'])
-
     # output_dir = Path(args.output_dir)
     if args.resume:
         if args.resume.startswith('https'):
@@ -112,7 +78,7 @@ def main(args):
             box_label=[f"{results['box_label'][i]}_{results['scores'][i].item():.3f}" for i, p in enumerate(mask) if p],
             # box_label=[f"{results['box_label'][i]}" for i, p in enumerate(mask) if p],
             image_id=idx,
-        ), caption=name, savedir=os.path.join(args.output_dir, "vis"), show_in_console=False)
+        ), caption=name, savedir=os.path.join(args.output_dir, args.resume.split('/')[-3]), show_in_console=False)
         print("here")
     
     with torch.no_grad():
@@ -129,7 +95,14 @@ def main(args):
             def score(results):
                 return results['scores'] >= DETECTION_THRESHOLD
             def target_class(results):
-                target_catids = [28, 21, 47, 6, 76, 41, 18, 63, 32, 36, 81, 22, 61, 87, 5, 17, 49]
+                if args.label_version == 'small_RN50base':
+                    target_catids = [1, 2, 3, 4, 28, 21, 47, 6, 76, 41, 18, 63, 32, 36, 81, 22, 61, 87, 5, 17, 49]
+                elif args.label_version == 'tiny_RN50base':
+                    target_catids = [28, 21, 47, 6, 76, 41, 18, 63, 32, 36, 81, 22, 61, 87, 5, 17, 49, 84,85,86,90]
+                elif args.label_version == 'woperson':
+                    target_catids = [1, 28, 21, 47, 6, 76, 41, 18, 63, 32, 36, 81, 22, 61, 87, 5, 17, 49]
+                else:
+                    target_catids = [28, 21, 47, 6, 76, 41, 18, 63, 32, 36, 81, 22, 61, 87, 5, 17, 49]
                 ret = []
                 for label in results['labels']:
                     ret.append(dataset_val.label2catid[label.item()] in target_catids)

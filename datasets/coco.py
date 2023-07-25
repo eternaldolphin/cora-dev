@@ -18,10 +18,10 @@ from pycocotools import mask as coco_mask
 from util import box_ops
 
 import datasets.transforms as T
-
+from util.box_ops import box_cxcywh_to_xyxy
 
 class CocoDetection(torchvision.datasets.CocoDetection):
-    def __init__(self, img_folder, ann_file, transforms, return_masks, tag_annotation, pseudo_box):
+    def __init__(self, img_folder, ann_file, transforms, return_masks, tag_annotation, pseudo_box, args):
         super(CocoDetection, self).__init__(img_folder, ann_file)
         self._transforms = transforms
         
@@ -43,7 +43,7 @@ class CocoDetection(torchvision.datasets.CocoDetection):
                 self.pseudo_annotations[annotation['image_id']].append(annotation)
         
         self.prepare = ConvertCocoPolysToMask(return_masks, map=self.catid2label)
-
+        self.args = args
     def __getitem__(self, idx):
         img, target = super(CocoDetection, self).__getitem__(idx)
         image_id = self.ids[idx]
@@ -54,6 +54,18 @@ class CocoDetection(torchvision.datasets.CocoDetection):
 
         target = {'image_id': image_id, 'annotations': target}
         img, target = self.prepare(img, target)
+        json_path = self.coco.loadImgs(image_id)[0]["file_name"].replace('jpg', 'json')
+        if self.args.sam_proposal:# TODO: change to proposal_embedding
+            if 'train' in str(self.img_folder):
+                mask_root = 'data/coco/sam_proposals/train'# TODO: proposal_embedding
+            else:
+                mask_root = 'data/coco/sam_proposals/val'
+            if self.debug:
+                mask_root = 'data/coco/sam_proposals/val'
+            with open(os.path.join(mask_root, json_path), 'r') as f:
+                sam_proposal = json.load(f)
+            target["proposals"] = torch.stack([torch.tensor(ann['bbox']) for ann in sam_proposal])# [100, 4]
+            target["proposals"] = box_cxcywh_to_xyxy(target["proposals"])
         if self._transforms is not None:
             img, target = self._transforms(img, target)
 
@@ -72,6 +84,16 @@ class CocoDetection(torchvision.datasets.CocoDetection):
 
         if self.image_tags is not None:
             target['class_labels'] = self.image_tags[str(image_id)]
+            
+        if self.args.sam_proposal:
+            assert len(target["mask_embedding"]) == len(target["proposals"])
+            if len(target["mask_embedding"]) == 0:
+                return self[(idx + 1) % len(self)]
+
+        if len(target["labels"]) == 0:
+            return self[(idx + 1) % len(self)]
+        else:
+            return img, target
 
         return img, target
 
@@ -234,8 +256,24 @@ def build(image_set, args):
             PATHS['train'] = (root / "train2017", root / "annotations" / f'{mode}_train2017_base_RN50x4relabel_coconames.json')
         elif args.label_version == 'RN50base':
             PATHS['train'] = (root / "train2017", root / "annotations" / f'{mode}_train2017_base_RN50relabel.json')
+        elif args.label_version == 'small_RN50base':
+            PATHS['train'] = (root / "train2017", root / "annotations" / f'{mode}_train2017_base_small_RN50relabel.json')
+        elif args.label_version == 'small_drop':
+            PATHS['train'] = (root / "train2017", root / "annotations" / f'{mode}_train2017_base_small_drop.json')
+        elif args.label_version == 'tiny_RN50base':
+            PATHS['train'] = (root / "train2017", root / "annotations" / f'{mode}_train2017_base_tiny_RN50relabel.json')
+        elif args.label_version == 'woperson':
+            PATHS['train'] = (root / "train2017", root / "annotations" / f'{mode}_train2017_base_woperson_RN50relabel.json')
         elif args.label_version == 'custom':
             PATHS['val'] = (root / "custom", root / "annotations" / f'custom.json')
+        elif args.label_version == 'base':
+            PATHS['train'] = (root / "train2017", root / "annotations" / f'{mode}_train2017_base.json')
+        elif args.label_version == 'fewshot':
+            PATHS["train"] = (root / "train2017", Path(args.coco_path + '_fewshot') / f'{mode}_train2017_base.json')
+            PATHS['val'] = (root / "val2017", root / "annotations" / f'{mode}_val2017.json')
+        elif args.label_version == 'fewshot_new':
+            PATHS["train"] = (root / "train2017", Path(args.coco_path + '_fewshot') / f'{mode}_train2017_novel.json')
+            PATHS['val'] = (root / "val2017", root / "annotations" / f'{mode}_val2017.json')
         if args.eval_target:
             PATHS['val'] = (root / "val2017", root / "annotations" / f'{mode}_val2017_target.json')
     else:
@@ -254,5 +292,6 @@ def build(image_set, args):
     else:
         transforms = make_coco_transforms(image_set, args)
         tag_annotation = None
-    dataset = CocoDetection(img_folder, ann_file, transforms=transforms, return_masks=args.masks, tag_annotation=tag_annotation, pseudo_box=args.pseudo_box)
+    dataset = CocoDetection(img_folder, ann_file, transforms=transforms, return_masks=args.masks, 
+    tag_annotation=tag_annotation, pseudo_box=args.pseudo_box, args=args)
     return dataset

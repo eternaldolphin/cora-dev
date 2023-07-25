@@ -57,54 +57,56 @@ class HungarianMatcher(nn.Module):
         obj_key = "pred_logits"
         box_key = "pred_boxes"
         bs, num_queries = outputs[obj_key].shape[:2]
-
+        # output.keys() ['pred_logits', 'pred_boxes', 'proposal', 'proposal_classes', 'use_nms']
         # We flatten to compute the cost matrices in a batch
-        out_prob = outputs[obj_key].flatten(0, 1).sigmoid()  # [batch_size * num_queries, num_classes]
-        out_bbox = outputs[box_key].flatten(0, 1)  # [batch_size * num_queries, 4]
+        out_prob = outputs[obj_key].flatten(0, 1).sigmoid()  # [batch_size * num_queries, num_classes] [2000, 1] 只有一个类别？
+        out_bbox = outputs[box_key].flatten(0, 1)  # [batch_size * num_queries, 4] [2000, 4]
 
         # Also concat the target labels and boxes
-        tgt_ids = torch.cat([v["labels"] for v in targets])
-        tgt_bbox = torch.cat([v["boxes"] for v in targets])
+        tgt_ids = torch.cat([v["labels"] for v in targets]) # [4]
+        tgt_bbox = torch.cat([v["boxes"] for v in targets]) # [4, 4]
 
         # Compute the classification cost.
         alpha = 0.25
         gamma = 2.0
-        neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
-        pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
-        cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]
+        neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())# [2000, 1]
+        pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())# [2000, 1]
+        cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]# [2000, 4]
 
         # Compute the L1 cost between boxes
-        cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
+        cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)# [2000, 4] [4, 4] -> [2000, 4]
 
         # Compute the giou cost betwen boxes
-        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
+        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))# [2000, 4]
 
         # Final cost matrix
-        C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
-        C = C.view(bs, num_queries, -1)
+        C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou# [2000, 4]
+        C = C.view(bs, num_queries, -1)# [2, 1000, 4]
 
-        sizes = [len(v["boxes"]) for v in targets]
-
+        sizes = [len(v["boxes"]) for v in targets]# [1, 3] 1+3=4
         ignore = []
         for score, box, target in zip(outputs['pred_logits'], outputs['pred_boxes'], targets):
+            # train: [2, 1000, 1] [2, 1000, 4] list(dict)
+            # val: [2, 1000, 65] [2, 1000, 4]
             # filter by threshold
-            score = score[:,0]
-            mask = score.sigmoid() > self.score_threshold
+            score = score[:,0] # [1000, 1]->[1000]
+            mask = score.sigmoid() > self.score_threshold# 2.0  [1000]
             ignore_idx = mask.nonzero()[:,0]
-            score = score[mask]
-            box = box[mask]
+            score = score[mask]# [0]
+            box = box[mask]# [0]
             keep = batched_nms(box_cxcywh_to_xyxy(box), score, torch.zeros_like(score), 0.5)
             ignore.append(ignore_idx[keep])
             
-
-        if 'proposal_classes' in outputs:
-            ori_tgt_ids = torch.cat([v["ori_labels"] for v in targets])
-            batch_idx = torch.cat([torch.zeros_like(v["ori_labels"]) + i for i, v in enumerate(targets)])
-            batched_ori_tgt_ids = torch.zeros_like(ori_tgt_ids).unsqueeze(0).repeat((len(targets), 1)) - 1
-            batched_ori_tgt_ids.scatter_(0, batch_idx.unsqueeze(0), ori_tgt_ids.unsqueeze(0))
+        # import ipdb;ipdb.set_trace()
+        if 'proposal_classes' in outputs:# val ['pred_logits', 'pred_boxes', 'proposal', 'proposal_classes', 'use_nms']
+            ori_tgt_ids = torch.cat([v["ori_labels"] for v in targets])# tensor([50, 50, 46, 46, 46, 46,  0,  0, 55, 59, 60, 60, 61, 62, 62, 46, 62, 62, 17], device='cuda:0')
+            batch_idx = torch.cat([torch.zeros_like(v["ori_labels"]) + i for i, v in enumerate(targets)])# tensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], device='cuda:0')
+            batched_ori_tgt_ids = torch.zeros_like(ori_tgt_ids).unsqueeze(0).repeat((len(targets), 1)) - 1# tensor([[-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1], [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]], device='cuda:0')
+            batched_ori_tgt_ids.scatter_(0, batch_idx.unsqueeze(0), ori_tgt_ids.unsqueeze(0))# tensor([[50, 50, 46, 46, 46, 46,  0,  0, 55, 59, 60, 60, 61, 62, 62, 46, 62, 62, -1], [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 17]], device='cuda:0')
 
             if 'semantic_cost' not in targets[0] and 'matching_threshold' not in targets[0]:
-                if 'class_group' in target:
+                # ['boxes', 'labels', 'pseudo_label_map', 'image_id', 'orig_size', 'size', 'ori_labels']
+                if 'class_group' in target:# false
                     class_group = torch.tensor(target['class_group'], device=batched_ori_tgt_ids.device).unsqueeze(0).expand(batched_ori_tgt_ids.size(0), len(target['class_group']))
                     out = torch.gather(class_group, dim=-1, index=outputs['proposal_classes'])
                     invalid = batched_ori_tgt_ids < 0
@@ -114,19 +116,20 @@ class HungarianMatcher(nn.Module):
                     valid_mask = out.unsqueeze(-1) == tgt.unsqueeze(1)
                 else:
                     # classified correctly
-                    if outputs['proposal_classes'].dim() == 3:
+                    if outputs['proposal_classes'].dim() == 3:# false [2, 1000]
                         batched_ori_tgt_ids = batched_ori_tgt_ids.unsqueeze(1)
                         valid_mask = (outputs['proposal_classes'].unsqueeze(-1) == batched_ori_tgt_ids.unsqueeze(1)).any(-2)
                     else:
-                        valid_mask = outputs['proposal_classes'].unsqueeze(-1) == batched_ori_tgt_ids.unsqueeze(1)
-                giou = -cost_giou.view(bs, num_queries, -1)
-                # only consider the correctly classified subset
+                        valid_mask = outputs['proposal_classes'].unsqueeze(-1) == batched_ori_tgt_ids.unsqueeze(1)# [2, 1000, 1] [2, 1, 19] -> [2, 1000, 19]预测的是label里面有的类别就留下
+
+                giou = -cost_giou.view(bs, num_queries, -1)# [2000, 19]->[2, 1000, 19]
+                # only consider the correctly classified subset 只优化proposal的class在target label里的proposal
                 giou[~valid_mask] = -1
                 # any one of the correctly classified subset has giou > 0 is a valid box
-                valid_box = (giou > 0).any(1)
+                valid_box = (giou > 0).any(1)# [2, 19]保留和1000个proposal iou>0的target bbox [2, 14]
                 # remove the invalid box
-                valid_mask[~valid_box.unsqueeze(1).expand_as(valid_mask)] = False
-                C[~valid_mask] = 99
+                valid_mask[~valid_box.unsqueeze(1).expand_as(valid_mask)] = False# [2, 1000, 19]
+                C[~valid_mask] = 99# [2, 1000, 19]
             else:
                 invalid = batched_ori_tgt_ids < 0
                 batched_ori_tgt_ids[invalid] = 0
@@ -148,16 +151,16 @@ class HungarianMatcher(nn.Module):
                 else:
                     semantic_cost = ((1 - torch.bmm(proposal_feature, target_feature.permute(0,2,1))) * targets[0]['semantic_cost']).exp() - 1
                     C = C + semantic_cost
-            
-        C = C.cpu()
+
+        C = C.cpu()# [2, 1000, 19]
 
         indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
 
         C = [c[i] for i, c in enumerate(C.split(sizes, -1))]
         new_indices = []
-        for i, c in enumerate(C):
+        for i, c in enumerate(C):# len=2 C[0] [1000, 18]
             mask = (c[indices[i]] < 99).numpy()
-            new_indices.append((indices[i][0][mask], indices[i][1][mask]))
+            new_indices.append((indices[i][0][mask], indices[i][1][mask]))# mask一部分
         indices = new_indices
 
         new_ignore = []

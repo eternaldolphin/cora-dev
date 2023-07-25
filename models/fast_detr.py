@@ -87,21 +87,34 @@ class FastDETR(nn.Module):
                 ))
             self.input_proj = nn.ModuleList(input_proj_list)
         else:
-            if self.args.epochs >= 25:
-                kernel_size = 1
-                padding = 0
-                self.input_proj = nn.ModuleList([
-                    nn.Sequential(
-                        nn.Conv2d(backbone.num_channels[0], self.hidden_dim, kernel_size=kernel_size, padding=padding),
-                    )])
-                if self.args.add_gn:
-                    self.input_proj[0].append(nn.GroupNorm(32, self.hidden_dim))
+            if self.args.backbone_feature == 'layer4':
+                if self.args.epochs >= 25:
+                    kernel_size = 1
+                    padding = 0
+                    self.input_proj = nn.ModuleList([
+                        nn.Sequential(
+                            nn.Conv2d(backbone.num_channels[1], self.hidden_dim, kernel_size=kernel_size, padding=padding),
+                        )])
+                else:
+                    self.input_proj = nn.ModuleList([
+                        nn.Sequential(
+                            nn.Conv2d(backbone.num_channels[1], self.hidden_dim, kernel_size=1),
+                            nn.GroupNorm(32, self.hidden_dim),
+                        )])
             else:
-                self.input_proj = nn.ModuleList([
-                    nn.Sequential(
-                        nn.Conv2d(backbone.num_channels[0], self.hidden_dim, kernel_size=1),
-                        nn.GroupNorm(32, self.hidden_dim),
-                    )])
+                if self.args.epochs >= 25:
+                    kernel_size = 1
+                    padding = 0
+                    self.input_proj = nn.ModuleList([
+                        nn.Sequential(
+                            nn.Conv2d(backbone.num_channels[0], self.hidden_dim, kernel_size=kernel_size, padding=padding),
+                        )])
+                else:
+                    self.input_proj = nn.ModuleList([
+                        nn.Sequential(
+                            nn.Conv2d(backbone.num_channels[0], self.hidden_dim, kernel_size=1),
+                            nn.GroupNorm(32, self.hidden_dim),
+                        )])
 
         # self.class_embed = nn.Linear(self.hidden_dim, num_classes)
         self.bbox_embed = MLP(self.hidden_dim, self.hidden_dim, 4, 3)
@@ -109,14 +122,9 @@ class FastDETR(nn.Module):
         # init prior_prob setting for focal loss
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
-        if self.args.end2end:
-            self.image_proj = nn.Linear(self.hidden_dim, self.classifier.text_projection.data.size(1))
-            self.class_bias = nn.Parameter(torch.ones([]) * bias_value)
-            self.tau = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-        else:
-            self.objectness_embed = nn.Linear(self.hidden_dim, 1)
-            if not self.args.disable_init:
-                nn.init.constant_(self.objectness_embed.bias, bias_value)
+        self.objectness_embed = nn.Linear(self.hidden_dim, 1)
+        if not self.args.disable_init:
+            nn.init.constant_(self.objectness_embed.bias, bias_value)
 
         if self.args.rpn:
             self.stage1_box_embed = MLP(self.hidden_dim, self.hidden_dim, 4, 3)
@@ -168,15 +176,14 @@ class FastDETR(nn.Module):
         else:
             with torch.no_grad():
                 features, pos_embeds = self.backbone(samples)
-
         src, mask = features[self.args.backbone_feature].decompose()
-        srcs = [self.input_proj[0](src)]
+        # layer3 [2, 1024, 66, 66]/ layer4 [2, 2048, 33, 33](proposal sample feature)
+        srcs = [self.input_proj[0](src)]# 1024->256 list=1 [2, 256, 54, 75]
         masks = [mask]
         assert mask is not None
-
         if not self.args.rpn:
-            query = self.query_embed.weight
-            query = query.unsqueeze(1).expand(-1, srcs[0].size(0), -1)
+            query = self.query_embed.weight# [1000, 4]
+            query = query.unsqueeze(1).expand(-1, srcs[0].size(0), -1)# [1000, 2, 4]
         else:
             query = None
 
@@ -189,46 +196,48 @@ class FastDETR(nn.Module):
                 # classify the proposal
                 # TODO: try align the feature with training stage
                 # if any error here, make sure layer4 is passed
-                src_feature = features['layer4']
+                src_feature = features['layer4']# [4, 2048, 32, 27]feature [4, 32, 27]mask 从第四层取特征
                 sizes = [((1 - m[0].float()).sum(), (1 - m[:,0].float()).sum()) for m in src_feature.decompose()[1]]
+                # 4 (tensor(20., device='cuda:0'), tensor(30., device='cuda:0')), ...
                 
                 if self.args.box_conditioned_pe:
                     box_emb = gen_sineembed_for_position(query.sigmoid())[:,:,256:]
                 else:
                     box_emb = None
-
+                # 
                 with torch.no_grad():
                     roi_features = self._sample_feature(sizes, query.sigmoid().permute(1,0,2), src_feature.tensors, extra_conv=False, box_emb=box_emb)
+                    # [2, 1000, 1024]          = , [2, 1000, 4], [4, 2048, 32, 27], 
                     # classify the proposals
-                    text_feature = self.classifier(categories)
+                    text_feature = self.classifier(categories)# ->[65, 1024]
                 
-                if split_class:
+                if split_class:# 有一定概率是true/false
                     # split class
-                    split_mask = torch.rand_like(text_feature[:,0]) > 0.5
-                    text_feature1 = text_feature.clone()
-                    text_feature2 = text_feature.clone()
+                    split_mask = torch.rand_like(text_feature[:,0]) > 0.5# [65] [False,  True,  True, False, F..
+                    text_feature1 = text_feature.clone()# [65, 1024]
+                    text_feature2 = text_feature.clone()# [65, 1024]
                     text_feature1[split_mask] = 0.0
                     text_feature2[~split_mask] = 0.0
-                    outputs_class1 = roi_features @ text_feature1.t()
-                    outputs_class2 = roi_features @ text_feature2.t()
-                    outputs_class = torch.cat([outputs_class1, outputs_class2])
-                    ori_bs = len(sizes)
-                    sizes = [*sizes, *sizes]
-                    query = query.repeat(1, 2, 1)
+                    outputs_class1 = roi_features @ text_feature1.t()# [2, 1000, 1024] [65, 1024]->[2, 1000, 65]
+                    outputs_class2 = roi_features @ text_feature2.t()# [2, 1000, 1024] [65, 1024]->[2, 1000, 65]
+                    outputs_class = torch.cat([outputs_class1, outputs_class2])# [2, 1000, 65][2, 1000, 65]->[4, 1000, 65]
+                    ori_bs = len(sizes)# 2
+                    sizes = [*sizes, *sizes]# 重复一遍，不懂是干什么的
+                    query = query.repeat(1, 2, 1)# [1000, 2, 4]->[1000, 4, 4]
                     for k in features.keys():
-                        features[k].tensors = features[k].tensors.repeat(2, 1, 1, 1)
-                        features[k].mask = features[k].mask.repeat(2, 1, 1)
+                        features[k].tensors = features[k].tensors.repeat(2, 1, 1, 1)# [2, 1024, 50, 74]->[4, 1024, 50, 74]
+                        features[k].mask = features[k].mask.repeat(2, 1, 1)# [2, 50, 74]->[4, 50, 74]
                 else:
                     outputs_class = roi_features @ text_feature.t()
-                    
+
                 with torch.no_grad():
-                    if gt_classes is not None:
+                    if gt_classes is not None:# None
                         new_outputs_class = torch.zeros_like(outputs_class)
                         for i, gt_idx in enumerate(gt_classes):
                             new_outputs_class[i, :, gt_idx] = outputs_class[i, :, gt_idx]
                         outputs_class = new_outputs_class
-                    outputs_class = torch.cat([outputs_class, torch.ones_like(outputs_class[:,:,:1]) * self.args.bg_threshold], dim=-1)
-                    if self.args.softmax_along == 'class':
+                    outputs_class = torch.cat([outputs_class, torch.ones_like(outputs_class[:,:,:1]) * self.args.bg_threshold], dim=-1)# ->[4, 1000, 66]
+                    if self.args.softmax_along == 'class':# 'class'
                         outputs_class = (outputs_class * 100).softmax(dim=-1)
                     elif self.args.softmax_along == 'box':
                         outputs_class = (outputs_class * 100).softmax(dim=-2)
@@ -236,70 +245,82 @@ class FastDETR(nn.Module):
                         pass
                     if self.args.target_class_factor != 1.0 and not self.training:
                         if outputs_class.size(-1) == 66:
-                            # COCO
-                            target_index = [4, 5, 11, 12, 15, 16, 21, 23, 27, 29, 32, 34, 45, 47, 54, 58, 63]
+                            if self.args.label_version == 'small_RN50base':
+                                target_index = [0, 1, 2, 3, 4, 5, 11, 12, 15, 16, 21, 23, 27, 29, 32, 34, 45, 47, 54, 58, 63]
+                            elif self.args.label_version == 'tiny_RN50base':
+                                target_index = [4, 5, 11, 12, 15, 16, 21, 23, 27, 29, 32, 34, 45, 47, 54, 58, 60, 61, 62, 63, 64]
+                            elif self.args.label_version == 'woperson':
+                                target_index = [0, 4, 5, 11, 12, 15, 16, 21, 23, 27, 29, 32, 34, 45, 47, 54, 58, 63]
+                            else:
+                                # COCO
+                                target_index = [4, 5, 11, 12, 15, 16, 21, 23, 27, 29, 32, 34, 45, 47, 54, 58, 63]
                         elif outputs_class.size(-1) == 1204:
                             # LVIS
                             target_index = [12, 13, 16, 19, 20, 29, 30, 37, 38, 39, 41, 48, 50, 51, 62, 68, 70, 77, 81, 84, 92, 104, 105, 112, 116, 118, 122, 125, 129, 130, 135, 139, 141, 143, 146, 150, 154, 158, 160, 163, 166, 171, 178, 181, 195, 201, 208, 209, 213, 214, 221, 222, 230, 232, 233, 235, 236, 237, 239, 243, 244, 246, 249, 250, 256, 257, 261, 264, 265, 268, 269, 274, 280, 281, 286, 290, 291, 293, 294, 299, 300, 301, 303, 306, 309, 312, 315, 316, 320, 322, 325, 330, 332, 347, 348, 351, 352, 353, 354, 356, 361, 363, 364, 365, 367, 373, 375, 380, 381, 387, 388, 396, 397, 399, 404, 406, 409, 412, 413, 415, 419, 425, 426, 427, 430, 431, 434, 438, 445, 448, 455, 457, 466, 477, 478, 479, 480, 481, 485, 487, 490, 491, 502, 505, 507, 508, 512, 515, 517, 526, 531, 534, 537, 540, 541, 542, 544, 550, 556, 559, 560, 566, 567, 570, 571, 573, 574, 576, 579, 581, 582, 584, 593, 596, 598, 601, 602, 605, 609, 615, 617, 618, 619, 624, 631, 633, 634, 637, 639, 645, 647, 650, 656, 661, 662, 663, 664, 670, 671, 673, 677, 685, 687, 689, 690, 692, 701, 709, 711, 713, 721, 726, 728, 729, 732, 742, 751, 753, 754, 757, 758, 763, 768, 771, 777, 778, 782, 783, 784, 786, 787, 791, 795, 802, 804, 807, 808, 809, 811, 814, 819, 821, 822, 823, 828, 830, 848, 849, 850, 851, 852, 854, 855, 857, 858, 861, 863, 868, 872, 882, 885, 886, 889, 890, 891, 893, 901, 904, 907, 912, 913, 916, 917, 919, 924, 930, 936, 937, 938, 940, 941, 943, 944, 951, 955, 957, 968, 971, 973, 974, 982, 984, 986, 989, 990, 991, 993, 997, 1002, 1004, 1009, 1011, 1014, 1015, 1027, 1028, 1029, 1030, 1031, 1046, 1047, 1048, 1052, 1053, 1056, 1057, 1074, 1079, 1083, 1115, 1117, 1118, 1123, 1125, 1128, 1134, 1143, 1144, 1145, 1147, 1149, 1156, 1157, 1158, 1164, 1166, 1192]
+                        elif outputs_class.size(-1) == 81:
+                            if self.args.label_version == 'fewshot':
+                                target_index = [0, 1, 2, 3, 4, 5, 6, 8, 14, 15, 16, 17, 18, 19, 39, 56, 57, 58, 60, 62]
+                            elif self.args.label_version == 'fewshot_new':
+                                target_index = [7, 9, 10, 11, 12, 13, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 59, 61, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79]
+                            else:
+                                pass
                         else:
                             assert False, "the dataset may not be supported"
                         outputs_class[:,:,target_index] = outputs_class[:,:,target_index] * self.args.target_class_factor
-                    if self.args.bg_threshold == -1.:
-                        outputs_class = outputs_class[:,:,:-1]
-                        num_classes = len(categories)
+                    outputs_class = outputs_class[:,:,:-1]# [2, 1000, 66]->[2, 1000, 65]
+                    num_classes = len(categories)# 65
+
+
+                    if self.args.topk_matching <= 0:
+                        classes_ = outputs_class.max(-1)[1]# [2, 1000, 48]->[2, 1000]TODO:check是train65和eval48吗 trian:[2, 1000, 65]->[2, 1000]
                     else:
-                        text_feature = torch.cat([text_feature, torch.zeros_like(text_feature[:1])], dim=0)
-                        num_classes = len(categories) + 1
-                    if self.args.global_topk:
-                        confidences, selected_indices = outputs_class.flatten(1,2).topk(k=1000, dim=-1)
-                        indices = selected_indices // num_classes
-                        classes_ = selected_indices % num_classes
-                        indices = indices.permute(1,0).unsqueeze(-1).expand(indices.size(1), indices.size(0), 4)
-                    else:
-                        if self.args.resample_factor != 1.0:
-                            assert False
-                            ori_dist = outputs_class.sum(1)
-                            if self.args.filter_classes:
-                                filtered_dist = torch.zeros_like(ori_dist)
-                                for i, cls in enumerate(outputs_class.max(dim=-1)[1]):
-                                    filtered_dist[i, torch.unique(cls)] = ori_dist[i, torch.unique(cls)]
-                                ori_dist = filtered_dist
-                            # OT requires extra precision
-                            adjusted_dist = (ori_dist ** self.args.resample_factor).to(torch.float64)
-                            class_dist = adjusted_dist / adjusted_dist.sum(-1, keepdim=True)
-                            box_dist = torch.zeros_like(outputs_class[:,:,0]).to(torch.float64) + (1 / outputs_class.size(1))
-                            classes = []
-                            for b, c, cost in zip(box_dist, class_dist, -outputs_class):
-                                classes.append(ot.emd(b, c, cost))
-                            classes = torch.stack(classes).max(-1)[1]
-                        else:
-                            if self.args.topk_matching <= 0:
-                                classes_ = outputs_class.max(-1)[1]
-                            else:
-                                classes_ = outputs_class.topk(dim=-1, k=self.args.topk_matching)[1]
-                            classes_, indices = classes_.sort(-1)
-                            indices = indices.permute(1,0).unsqueeze(-1).expand(indices.size(1), indices.size(0), 4)
-                query = torch.gather(query, 0, indices)
+                        classes_ = outputs_class.topk(dim=-1, k=self.args.topk_matching)[1]
+                    classes_, indices = classes_.sort(-1)# [2, 1000] [2, 1000] // split class: [4, 1000] [4, 1000]
+                    indices = indices.permute(1,0).unsqueeze(-1).expand(indices.size(1), indices.size(0), 4)# [1000, 2, 4]// split class: [1000, 4, 4]
+                query = torch.gather(query, 0, indices)# -> [1000, 2, 4] // split class: [1000, 4, 4]
                 sa_mask = None
                 if self.args.condition_on_text:
-                    projected_text = self.text_proj(text_feature)
+                    projected_text = self.text_proj(text_feature)# [65, 1024]->[65, 256]映射text feature维度/train: [48, 1024]->[48, 256]
+                    '''
+                    MLP(
+                        (layers): ModuleList(
+                            (0): Linear(in_features=1024, out_features=128, bias=True)
+                            (1): Linear(in_features=128, out_features=256, bias=True)
+                            )
+                        )
+                    '''
                     if classes_.dim() == 3:
                         used_classes_ = classes_[:,:,0]
                     else:
-                        used_classes_ = classes_
+                        used_classes_ = classes_# [2, 1000]
                     query_features = F.one_hot(used_classes_, num_classes=text_feature.size(0)).to(text_feature.dtype) @ projected_text
-            return classes_, query_features, query, confidences
-
+                    # [2, 1000] 48 ([2, 1000, 48]) @ [48, 256] -> [2, 1000, 256]
+                    # import ipdb;ipdb.set_trace()# check false positive
+                    # false_class = len(set(used_classes_.flatten().tolist()))
+                    # true_classes = []
+                    # for t in targets:
+                    #     true_classes.append(t['labels'])
+                    # true_class = len(set(true_classes))
+                    # print('pred_ratio: ', false_class/48, 'gt_ratio: ', false_class/true_class)
+                    # import ipdb;ipdb.set_trace()
+            return classes_, query_features, query, confidences# [2, 1000] [2, 1000, 256] [1000, 2, 4] None// split class [4, 1000] [4, 1000, 256] [1000, 4, 4] None
+            # split class [4, 1000] None [1000, 4, 4] None
         if not self.args.rpn:
-            classes_, query_features, query, confidences = get_query_and_mask(query)
+            # import ipdb;ipdb.set_trace()
+            if self.args.sam_proposal and self.training:
+                len_proposal = min([len(target['proposals']) for target in targets])
+                query_proposal = torch.stack([target['proposals'][:len_proposal] for target in targets])
+                query = torch.concat([query, query_proposal])
+            classes_, query_features, query, confidences = get_query_and_mask(query)# [1000, 2, 4]->[2, 1000] [2, 1000, 256] [1000, 2, 4] None
         else:
             query_features = None
             classes_ = None
             confidences = None
 
         used_pos_embed = [pos_embeds[self.args.backbone_feature]]
-
-        hs, reference, memory, classes_temp, out_dict, confidences_ = self.transformer(srcs, masks, query, used_pos_embed, tgt_mask=None, src_query=query_features, cls_func=get_query_and_mask)
+        hs, reference, memory, classes_temp, out_dict, confidences_ = self.transformer(srcs, masks, 
+            query, used_pos_embed, tgt_mask=None, src_query=query_features, 
+            cls_func=get_query_and_mask)
         if classes_temp is not None and classes_ is None:
             classes_ = classes_temp
         if confidences_ is not None and confidences is None:
@@ -310,55 +331,44 @@ class FastDETR(nn.Module):
 
         outputs_coords = []
         outputs_class = []
+   
         for lvl in range(reference.shape[0]):
             reference_before_sigmoid = inverse_sigmoid(reference[lvl])
             bbox_offset = self.bbox_embed[lvl](hs[lvl])
             outputs_coord = (reference_before_sigmoid + bbox_offset).sigmoid()
             outputs_coords.append(outputs_coord)
-            if self.args.end2end:
-                image_feat = self.image_proj(hs[lvl])
-                image_feat = image_feat / image_feat.norm(dim=-1, keepdim=True)
-                text_feature = self.classifier(categories)
-                similarity = image_feat @ text_feature.t()
-                logits = similarity * self.tau.exp() + self.class_bias
-                outputs_class.append(logits)
 
         outputs_coords = torch.stack(outputs_coords)
 
-        if self.args.end2end:
-            outputs_class = torch.stack(outputs_class)
-            out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coords[-1]}
-            if self.aux_loss:
-                out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coords)
-            return out
-        else:
-            objectness_score = self.objectness_embed(hs)
+        objectness_score = self.objectness_embed(hs)
 
         roi_feats = []
-        if not self.training:
+        if not self.training:# notice
             src_feature = features['layer4' if self.training else 'layer3']
             sizes = [((1 - m[0].float()).sum(), (1 - m[:,0].float()).sum()) for m in src_feature.decompose()[1]]
 
-            boxes = outputs_coords
+            boxes = outputs_coords# [6, 2, 1000, 4]
             
             if self.aux_loss and self.training:
                 sample_box = boxes
             else:
                 sample_box = boxes[-1:]
 
-            for coord in sample_box:
-                if self.args.box_conditioned_pe or hasattr(self, 'test_attnpool'):
+
+            for coord in sample_box:# [1, 2, 1000, 4]
+                if self.args.box_conditioned_pe or hasattr(self, 'test_attnpool'):              
                     box_emb = gen_sineembed_for_position(coord.permute(1,0,2))[:,:,256:]
                 else:
                     box_emb = None
                 roi_feats.append(self._sample_feature(sizes, coord, src_feature.tensors, extra_conv=not self.training, box_emb=box_emb))
+                # sizes [2, 1000, 4] [2, 1024, 54, 75] True False -> [[2, 1000, 1024], ...]
+                # len(list)=1 [2, 1000, 1024]
+            roi_features = roi_feats[-1]# [2, 1000, 1024]
+            roi_feats = torch.stack(roi_feats)# [1, 2, 1000, 1024]
 
-            roi_features = roi_feats[-1]
-            roi_feats = torch.stack(roi_feats)
-
-        out = {'pred_logits': objectness_score[-1], 'pred_boxes': outputs_coords[-1]}
-        if query is not None:
-            out['proposal'] = query.sigmoid()
+        out = {'pred_logits': objectness_score[-1], 'pred_boxes': outputs_coords[-1]}# [2, 1000, 1] [2, 1000, 4]训练的时候分类是objectness
+        if query is not None:# [1000, 2, 4]
+            out['proposal'] = query.sigmoid()# [1000, 2, 4]
 
         if self.args.masks:
             out['last_hs'] = hs[-1]
@@ -369,14 +379,14 @@ class FastDETR(nn.Module):
             out['split_class'] = True
             
                 
-        if self.aux_loss:
+        if self.aux_loss:# val:True
             out['aux_outputs'] = self._set_aux_loss(objectness_score, outputs_coords)
 
-        if self.args.remove_misclassified:
-            out['proposal_classes'] = classes_
+        if self.args.remove_misclassified:# val:True
+            out['proposal_classes'] = classes_ # [2, 1000]
             if self.aux_loss:
                 for aux in out['aux_outputs']:
-                    aux['proposal_classes'] = classes_
+                    aux['proposal_classes'] = classes_# 用于后续match只有match上了才进行loss计算 valid_mask
 
         if self.args.semantic_cost > 0 or self.args.matching_threshold >= 0:
             out['text_feature'] = self.classifier(categories)
@@ -385,10 +395,10 @@ class FastDETR(nn.Module):
                     aux['text_feature'] = self.classifier(categories)
         
         # add the rpn prediction
-        if out_dict is not None:
+        if out_dict is not None:# val:None
             out['rpn_output'] = out_dict
 
-        if self.args.iou_rescore:
+        if self.args.iou_rescore:# val:False
             iou_objectness = []
             for coord, target in zip(outputs_coords[-1], targets):
                 iou_objectness.append(box_iou(box_ops.box_cxcywh_to_xyxy(coord), box_ops.box_cxcywh_to_xyxy(target['boxes']))[0].max(dim=-1)[0])
@@ -397,29 +407,14 @@ class FastDETR(nn.Module):
             objectness_score[-1] = iou_objectness
 
         if not self.training:
-
-            if self.args.aggresive_eval:
-                if self.args.iou_relabel_eval:
-                    ious = [generalized_box_iou(box_cxcywh_to_xyxy((out['pred_boxes'][i])), box_cxcywh_to_xyxy(target['boxes'])) for i, target in enumerate(targets)]
-                    gt_idx = [iou.argmax(dim=-1) for iou in ious]
-                    gt_labels = [torch.gather(target['labels'], dim=0, index=gt_idx_) for target, gt_idx_ in zip(targets, gt_idx)]
-                    gt_labels = torch.stack(gt_labels)
-                    classes_ = gt_labels
-                scores = F.one_hot(classes_, num_classes=len(categories))
-                if confidences is not None:
-                    scores = scores * confidences.unsqueeze(-1)
-                scores = scores * objectness_score[-1].sigmoid()
-                out['pred_logits'] = inverse_sigmoid(scores)
-            else:
-                # the text feature
-                text_feature = self.classifier(categories)
-                outputs_class = roi_features @ text_feature.t()
-                outputs_class = torch.cat([outputs_class, torch.zeros_like(outputs_class[:,:,:1])], dim=-1)
-                outputs_class = (outputs_class * self.args.eval_tau).softmax(dim=-1) * (objectness_score[-1].sigmoid() ** self.args.objectness_alpha)
-                outputs_class = outputs_class[:,:,:-1]
-                outputs_class = inverse_sigmoid(outputs_class)
-                out['pred_logits'] = outputs_class
-
+            # the text feature
+            text_feature = self.classifier(categories)# [65, 1024]
+            outputs_class = roi_features @ text_feature.t()# [2, 1000, 65]
+            outputs_class = torch.cat([outputs_class, torch.zeros_like(outputs_class[:,:,:1])], dim=-1)# [2, 1000, 66]
+            outputs_class = (outputs_class * self.args.eval_tau).softmax(dim=-1) * (objectness_score[-1].sigmoid() ** self.args.objectness_alpha)# [2, 1000, 66]*100 [2, 1000, 1]**1->[2, 1000, 66]
+            outputs_class = outputs_class[:,:,:-1]# [2, 1000, 65]
+            outputs_class = inverse_sigmoid(outputs_class)# [2, 1000, 65]
+            out['pred_logits'] = outputs_class# [2, 1000, 65]
         if self.args.use_nms and not self.args.no_nms:
             out['use_nms'] = 0
 
@@ -427,38 +422,44 @@ class FastDETR(nn.Module):
 
     @torch.no_grad()
     def _sample_feature(self, sizes, pred_boxes, features, extra_conv, unflatten=True, box_emb=None):
-        rpn_boxes = [box_ops.box_cxcywh_to_xyxy(pred) for pred in pred_boxes]
+        rpn_boxes = [box_ops.box_cxcywh_to_xyxy(pred) for pred in pred_boxes]# list(tensor)=4 [1000, 4]
         for i in range(len(rpn_boxes)):
-            rpn_boxes[i][:,[0,2]] = rpn_boxes[i][:,[0,2]] * sizes[i][0]
+            rpn_boxes[i][:,[0,2]] = rpn_boxes[i][:,[0,2]] * sizes[i][0]# w乘上自己对应的size
             rpn_boxes[i][:,[1,3]] = rpn_boxes[i][:,[1,3]] * sizes[i][1]
 
         if self.args.backbone == 'clip_RN50x4':
             reso = 18
         elif self.args.backbone == 'clip_RN50':
             reso = 14
-
-        if self.args.no_efficient_pooling or extra_conv:
+        if self.args.no_efficient_pooling or extra_conv:# False False
             roi_features = torchvision.ops.roi_align(
-                features,
+                features,# [2, 2048, 27, 37]/[2, 1024, 54, 75]
                 rpn_boxes,
                 output_size=(reso, reso) if extra_conv else (reso // 2, reso // 2),
                 spatial_scale=1.0,
-                aligned=True)  # (bs * num_queries, c, 14, 14)
-
+                aligned=True)  # (bs * num_queries, c, 14, 14) [2000, 1024, 14, 14]
             if extra_conv:
-                roi_features = self.backbone[0].layer4(roi_features)
+                roi_features = self.backbone[0].layer4(roi_features)# [2000, 1024, 14, 14]->[2000, 2048, 7, 7]
             if hasattr(self, 'test_attnpool'):
                 self.test_attnpool[0].to(roi_features.device)
                 roi_features = self.test_attnpool[0](roi_features, box_emb)
             else:
-                roi_features = self.backbone[0].attn_pool(roi_features, box_emb)
+                roi_features = self.backbone[0].attn_pool(roi_features, box_emb)# [2000, 2048, 7, 7] None -> [2000, 1024]
         else:
             with torch.cuda.amp.autocast(enabled=False):
-                features = features.permute(0,2,3,1)
+                features = features.permute(0,2,3,1)# (eval)[4, 2048, 32, 27]->[4, 32, 27, 2048]
                 attn_pool = self.backbone[0].attn_pool
-                q_feat = attn_pool.q_proj(features)
-                k_feat = attn_pool.k_proj(features)
-                v_feat = attn_pool.v_proj(features)
+                '''
+                AttentionPool2d(
+                (k_proj): Linear(in_features=2048, out_features=2048, bias=True)
+                (q_proj): Linear(in_features=2048, out_features=2048, bias=True)
+                (v_proj): Linear(in_features=2048, out_features=2048, bias=True)
+                (c_proj): Linear(in_features=2048, out_features=1024, bias=True)
+                )
+                '''
+                q_feat = attn_pool.q_proj(features)# [4, 32, 27, 2048]->[4, 32, 27, 2048]
+                k_feat = attn_pool.k_proj(features)# [4, 32, 27, 2048]->[4, 32, 27, 2048]
+                v_feat = attn_pool.v_proj(features)# [4, 32, 27, 2048]->[4, 32, 27, 2048]
                 hacked = False
                 if box_emb is not None:
                     if not self.args.use_efficient_pe_proj:

@@ -40,6 +40,14 @@ def crop(image, target, region):
         target["area"] = area
         fields.append("boxes")
 
+    if "proposals" in target:
+        boxes = target["proposals"]# tensor([317.9863, 349.6933, 381.1543, 400.0000])
+        max_size = torch.as_tensor([w, h], dtype=torch.float32)# tensor([535., 397.])
+        cropped_boxes = boxes - torch.as_tensor([j, i, j, i])# -tensor([221,   3, 221,   3])->tensor([ 96.9863, 346.6933, 160.1543, 397.0000])
+        cropped_boxes = torch.min(cropped_boxes.reshape(-1, 2, 2), max_size)
+        cropped_boxes = cropped_boxes.clamp(min=0)
+        target["proposals"] = cropped_boxes.reshape(-1, 4)
+
     if "masks" in target:
         # FIXME should we update the area here if there are no boxes?
         target['masks'] = target['masks'][:, i:i + h, j:j + w]
@@ -71,6 +79,11 @@ def hflip(image, target):
         boxes = target["boxes"]
         boxes = boxes[:, [2, 1, 0, 3]] * torch.as_tensor([-1, 1, -1, 1]) + torch.as_tensor([w, 0, w, 0])
         target["boxes"] = boxes
+
+    if "proposals" in target:
+        boxes = target["proposals"]# tensor([374.2500, 174.0000, 398.5000, 190.5000], dtype=torch.float16)
+        boxes = boxes[:, [2, 1, 0, 3]] * torch.as_tensor([-1, 1, -1, 1]) + torch.as_tensor([w, 0, w, 0])
+        target["proposals"] = boxes# tensor([241.5000, 174.0000, 265.7500, 190.5000], dtype=torch.float16)
 
     if "masks" in target:
         target['masks'] = target['masks'].flip(-1)
@@ -121,6 +134,11 @@ def resize(image, target, size, max_size=None):
         boxes = target["boxes"]
         scaled_boxes = boxes * torch.as_tensor([ratio_width, ratio_height, ratio_width, ratio_height])
         target["boxes"] = scaled_boxes
+
+    if "proposals" in target:
+        boxes = target["proposals"]#[100, 4] tensor([ 67.4375, 108.4375, 119.8750, 145.7500], dtype=torch.float16)
+        scaled_boxes = boxes * torch.as_tensor([ratio_width, ratio_height, ratio_width, ratio_height])# [1.4206, 1.4203, 1.4206, 1.4203]
+        target["proposals"] = scaled_boxes
 
     if "area" in target:
         area = target["area"]
@@ -263,6 +281,11 @@ class Normalize(object):
             boxes = box_xyxy_to_cxcywh(boxes)
             boxes = boxes / torch.tensor([w, h, w, h], dtype=torch.float32)
             target["boxes"] = boxes
+        if "proposals" in target:
+            proposals = target["proposals"]
+            proposals = box_xyxy_to_cxcywh(proposals)
+            proposals = proposals / torch.tensor([w, h, w, h], dtype=torch.float32)
+            target["proposals"] = proposals
         return image, target
 
 

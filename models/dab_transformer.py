@@ -184,9 +184,9 @@ class Transformer(nn.Module):
         if self.disable_spatial_attn_mask:
             valid_ratio = None
             shape = None
-        memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, shape=shape, valid_ratio=valid_ratio)
+        memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, shape=shape, valid_ratio=valid_ratio)# [4150, 2, 256]
 
-        if refpoint_embed is not None:
+        if refpoint_embed is not None:# [1000, 2, 4] train
             if refpoint_embed.dim() == 2:
                 refpoint_embed = refpoint_embed.unsqueeze(1).repeat(1, bs, 1)
             else:
@@ -209,22 +209,23 @@ class Transformer(nn.Module):
             
 
         # in case of split_class
-        if src.size(1) != refpoint_embed.size(1):
-            mask = mask.repeat(2, 1)
-            pos_embed = pos_embed.repeat(1, 2, 1)
-            memory = memory.repeat(1, 2, 1)
+        if src.size(1) != refpoint_embed.size(1):# split class: [3700, 2, 256] [1000, 4, 4]
+            mask = mask.repeat(2, 1)# [2, 3700]->[4, 3700]
+            pos_embed = pos_embed.repeat(1, 2, 1)# [3700, 2, 256]->[3700, 4, 256]
+            memory = memory.repeat(1, 2, 1)# [3700, 2, 256]->[3700, 4, 256]
 
         # query_embed = gen_sineembed_for_position(refpoint_embed)
-        num_queries = refpoint_embed.shape[0]
+        num_queries = refpoint_embed.shape[0]# 1000
         if self.num_patterns == 0:
-            if src_query is not None:
+            if src_query is not None:# train
                 tgt = src_query.permute(1,0,2)
             else:
-                tgt = torch.zeros(num_queries, bs, self.d_model, device=refpoint_embed.device)
+                tgt = torch.zeros(num_queries, bs, self.d_model, device=refpoint_embed.device)# [1000, 2, 256]
+                if src.size(1) != refpoint_embed.size(1):# split class: [3700, 2, 256] [1000, 4, 4]
+                    tgt = tgt.repeat(1, 2, 1)# [1000, 2, 256]->[1000, 4, 256]
         else:
             tgt = self.patterns.weight[:, None, None, :].repeat(1, self.num_queries, bs, 1).flatten(0, 1) # n_q*n_pat, bs, d_model
             refpoint_embed = refpoint_embed.repeat(self.num_patterns, 1, 1) # n_q*n_pat, bs, d_model
-            # import ipdb; ipdb.set_trace()
         hs, references = self.decoder(tgt, memory, memory_key_padding_mask=mask,
                           pos=pos_embed, refpoints_unsigmoid=refpoint_embed, tgt_mask=tgt_mask, shape=shape, valid_ratio=valid_ratio)
         return hs, references, memory, classes, out_dict, confidences
@@ -318,13 +319,12 @@ class TransformerDecoder(nn.Module):
         output = tgt
 
         intermediate = []
-        reference_points = refpoints_unsigmoid.sigmoid()
+        reference_points = refpoints_unsigmoid.sigmoid()# [1000, 2, 4]
         if self.fix_reference_points:
             reference_points = reference_points * valid_ratio.permute(1,0,2).repeat(1,reference_points.size(1) // valid_ratio.size(0),2)
         
         ref_points = [reference_points]
 
-        # import ipdb; ipdb.set_trace()        
 
         for layer_id, layer in enumerate(self.layers):
             obj_center = reference_points[..., :self.query_dim]     # [num_queries, batch_size, 2]
@@ -346,9 +346,10 @@ class TransformerDecoder(nn.Module):
 
             # modulated HW attentions
             if self.modulate_hw_attn:
-                refHW_cond = self.ref_anchor_head(output).sigmoid() # nq, bs, 2
+                refHW_cond = self.ref_anchor_head(output).sigmoid() # [1000, 2, 256]->nq, bs, 2 [1000, 2, 2] // split class [1000, 4, 256]->[1000, 4, 2]
                 query_sine_embed[..., self.d_model // 2:] *= (refHW_cond[..., 0] / obj_center[..., 2]).unsqueeze(-1)
-                query_sine_embed[..., :self.d_model // 2] *= (refHW_cond[..., 1] / obj_center[..., 3]).unsqueeze(-1)
+                # refHW_cond [1000, 2, 2] // obj_center [1000, 4, 4]x [1000, 2, 4]right
+                query_sine_embed[..., :self.d_model // 2] *= (refHW_cond[..., 1] / obj_center[..., 3]).unsqueeze(-1)# [1000, 2, 256]
 
 
             output = layer(output, memory, tgt_mask=tgt_mask,

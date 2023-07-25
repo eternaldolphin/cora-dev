@@ -59,7 +59,8 @@ class FrozenBatchNorm2d(torch.nn.Module):
 
 
 class BackboneBase(nn.Module):
-    def __init__(self, backbone: nn.Module, train_backbone, num_channels: int, return_interm_layers: bool, feature_layer: str):
+    def __init__(self, backbone: nn.Module, train_backbone, num_channels: int, 
+    return_interm_layers: bool, feature_layer: str):
         super().__init__()
         for name, parameter in backbone.named_parameters():
             parameter.requires_grad_(train_backbone)
@@ -162,7 +163,7 @@ class Backbone(BackboneBase):
                 if feature_layer not in ['layer3', 'layer4', 'layer34', 'layer23', 'layer234']:
                     num_channels = state_dict['visual.attnpool.c_proj.weight'].size(0)
                 if region_prompt_path:
-                    region_prompt = torch.load(region_prompt_path, map_location='cpu')
+                    region_prompt = torch.load(region_prompt_path, map_location='cpu')# ['attnpool.positional_embedding'] [50, 2048]
                     new_state_dict.update(region_prompt)
                 backbone.load_state_dict(new_state_dict)
         else:
@@ -197,7 +198,7 @@ def build_backbone(args):
     position_embedding = build_position_encoding(args)
     return_interm_layers = args.masks or args.multiscale
     if args.backbone_feature == 'layer4':
-        feature_layer = 'layer4'
+        feature_layer = 'layer34'
     elif args.anchor_pre_matching:
         feature_layer = 'layer34'
     else:
