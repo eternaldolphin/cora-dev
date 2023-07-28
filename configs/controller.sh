@@ -28,7 +28,7 @@ if [ "$type" == 'local' ]; then
 
 elif [ "$type" == 'air' ]; then
 
-  header="python -m torch.distributed.launch --nproc_per_node=${gpu} --master_port 29822 --use_env main.py "
+  header="python -m torch.distributed.launch --nproc_per_node=${gpu} --master_port 29892 --use_env main.py "
 
 else
 

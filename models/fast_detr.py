@@ -145,7 +145,7 @@ class FastDETR(nn.Module):
         else:
             self.bbox_embed = _get_clones(self.bbox_embed, 1)
 
-        if self.args.condition_on_text:
+        if self.args.condition_on_text or self.args.binary_token:
             # hard code the number of dimension
             text_dim = self.args.text_dim
             self.text_proj = MLP(text_dim, self.args.condition_bottleneck, self.hidden_dim, 2)
@@ -153,10 +153,19 @@ class FastDETR(nn.Module):
         if self.args.test_attnpool_path:
             self.test_attnpool = [torch.load(self.args.test_attnpool_path)]
 
+        if self.args.binary_token:
+            # 100个正proposal 100个负proposal
+            self.num_cls_keys = 120
+            self.num_neg_keys = self.num_cls_keys
+            self.value_fg = nn.Embedding(1, 256)
+            self.value_bg = nn.Embedding(1, 256)
+            self.key_neg_posi = nn.Embedding(self.num_neg_keys, 4)
+            
+
     def forward(self, samples: NestedTensor, categories, gt_classes=None, targets=None, split_class=False):
         """The forward expects a NestedTensor, which consists of:
-               - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
-               - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
+               - samples.tensors: batched images, of shape [batch_size x 3 x H x W] [2, 3, 800, 1333]
+               - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels [2, 800, 1333]
 
             It returns a dict with the following elements:
                - "pred_logits": the classification logits (including no-object) for all queries.
@@ -273,6 +282,7 @@ class FastDETR(nn.Module):
 
                     if self.args.topk_matching <= 0:
                         classes_ = outputs_class.max(-1)[1]# [2, 1000, 48]->[2, 1000]TODO:check是train65和eval48吗 trian:[2, 1000, 65]->[2, 1000]
+                        scores_ = outputs_class.max(-1)[0]# [2, 1000]
                     else:
                         classes_ = outputs_class.topk(dim=-1, k=self.args.topk_matching)[1]
                     classes_, indices = classes_.sort(-1)# [2, 1000] [2, 1000] // split class: [4, 1000] [4, 1000]
@@ -295,23 +305,47 @@ class FastDETR(nn.Module):
                         used_classes_ = classes_# [2, 1000]
                     query_features = F.one_hot(used_classes_, num_classes=text_feature.size(0)).to(text_feature.dtype) @ projected_text
                     # [2, 1000] 48 ([2, 1000, 48]) @ [48, 256] -> [2, 1000, 256]
-                    # import ipdb;ipdb.set_trace()# check false positive
-                    # false_class = len(set(used_classes_.flatten().tolist()))
-                    # true_classes = []
-                    # for t in targets:
-                    #     true_classes.append(t['labels'])
-                    # true_class = len(set(true_classes))
-                    # print('pred_ratio: ', false_class/48, 'gt_ratio: ', false_class/true_class)
-                    # import ipdb;ipdb.set_trace()
-            return classes_, query_features, query, confidences# [2, 1000] [2, 1000, 256] [1000, 2, 4] None// split class [4, 1000] [4, 1000, 256] [1000, 4, 4] None
+                
+                key_content = None 
+                key_position = None
+                value_binary = None
+                if self.args.binary_token:
+                    # nms + topk proposal
+                    from torchvision.ops.boxes import nms
+                    import random
+                    projected_text = self.text_proj(text_feature)
+                    key_pos_cont = []
+                    key_neg_cont = []
+                    key_pos_posi = []
+                    for b in range(query.shape[1]):
+                        keep = nms(query[:, b, :], scores_[b], 0.7)[:self.num_cls_keys]# [1000, 4] [1000]->[100]
+                        key_pos_cont.append(projected_text[used_classes_[b][keep]])# [100, 1024]
+                        key_pos_posi.append(query[:, b, :][keep])# [100, 4]
+                        k_pos_class = classes_[b][keep]# 150
+                        k_neg_class = [c for c in range(projected_text.size(0)) if c not in k_pos_class]
+
+                        k_neg_classes = random.sample(k_neg_class, min(self.num_neg_keys, len(k_neg_class)))
+                        while len(k_neg_classes) < self.num_neg_keys: k_neg_classes.append(random.choice(k_neg_class))
+
+                        key_neg_cont.append(projected_text[k_neg_classes])
+                    key_pos_cont = torch.stack(key_pos_cont)# [2, 100, 256]
+                    key_neg_cont = torch.stack(key_neg_cont)# [2, 100, 256]
+                    key_content = torch.cat((key_pos_cont, key_neg_cont), dim=1)# [2, 200, 256]
+                    key_pos_posi = torch.stack(key_pos_posi)# [2, 100, 4]
+                    key_neg_posi = self.key_neg_posi.weight.unsqueeze(0).repeat(key_content.shape[0], 1, 1)# [2, 100, 4]
+                    key_position = torch.cat((key_pos_posi, key_neg_posi), dim=1)# [2, 200, 4]
+                    value_binary = torch.cat((self.value_fg.weight.repeat(self.num_cls_keys, 1), 
+                                              self.value_bg.weight.repeat(self.num_neg_keys, 1)), dim=0)# [200, 256]
+                    value_binary = value_binary.unsqueeze(0).repeat(key_content.shape[0], 1, 1)# [2, 200, 256]
+                    key_content = key_content.transpose(0, 1)
+                    key_position = key_position.transpose(0, 1)
+                    value_binary = value_binary.transpose(0, 1)
+                    query_features = None
+            return classes_, query_features, query, confidences, key_content, key_position, value_binary# [2, 1000] [2, 1000, 256] [1000, 2, 4] None// split class [4, 1000] [4, 1000, 256] [1000, 4, 4] None
             # split class [4, 1000] None [1000, 4, 4] None
         if not self.args.rpn:
             # import ipdb;ipdb.set_trace()
-            if self.args.sam_proposal and self.training:
-                len_proposal = min([len(target['proposals']) for target in targets])
-                query_proposal = torch.stack([target['proposals'][:len_proposal] for target in targets])
-                query = torch.concat([query, query_proposal])
-            classes_, query_features, query, confidences = get_query_and_mask(query)# [1000, 2, 4]->[2, 1000] [2, 1000, 256] [1000, 2, 4] None
+            classes_, query_features, query, confidences, key_content, key_position, value_binary = get_query_and_mask(query)# [1000, 2, 4]->[2, 1000] [2, 1000, 256] [1000, 2, 4] None
         else:
             query_features = None
             classes_ = None
@@ -320,8 +354,8 @@ class FastDETR(nn.Module):
         used_pos_embed = [pos_embeds[self.args.backbone_feature]]
         hs, reference, memory, classes_temp, out_dict, confidences_ = self.transformer(srcs, masks, 
             query, used_pos_embed, tgt_mask=None, src_query=query_features, 
-            cls_func=get_query_and_mask)
-        if classes_temp is not None and classes_ is None:
+            cls_func=get_query_and_mask, key_content=key_content, key_position=key_position, value_binary=value_binary)
+        if classes_temp is not None and classes_ is None:# None [2, 1000]
             classes_ = classes_temp
         if confidences_ is not None and confidences is None:
             confidences = confidences_
