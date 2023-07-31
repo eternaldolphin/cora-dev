@@ -165,6 +165,9 @@ def get_args_parser():
     parser.add_argument('--clip_aug', action='store_true')
     parser.add_argument('--sam_proposal', action='store_true')
     parser.add_argument('--binary_token', action='store_true')
+    parser.add_argument('--t2v_encoder', action='store_true')
+    parser.add_argument('--num_cls_keys', default=120, type=int)
+    parser.add_argument('--num_neg_keys', default=10, type=int)
 
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')

@@ -125,12 +125,11 @@ class FastDETR(nn.Module):
         self.objectness_embed = nn.Linear(self.hidden_dim, 1)
         if not self.args.disable_init:
             nn.init.constant_(self.objectness_embed.bias, bias_value)
-
-        if self.args.rpn:
-            self.stage1_box_embed = MLP(self.hidden_dim, self.hidden_dim, 4, 3)
-            self.stage1_obj_embed = nn.Linear(self.hidden_dim, 1)
+        if self.args.rpn or self.args.t2v_encoder:
+            self.transformer.stage1_box_embed = MLP(self.hidden_dim, self.hidden_dim, 4, 3)
+            self.transformer.stage1_obj_embed = nn.Linear(self.hidden_dim, 1)
             if not self.args.disable_init:
-                nn.init.constant_(self.stage1_obj_embed.bias, bias_value)
+                nn.init.constant_(self.transformer.stage1_obj_embed.bias, bias_value)
 
         # init bbox_embed
         nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
@@ -139,9 +138,6 @@ class FastDETR(nn.Module):
         if self.aux_loss:
             self.bbox_embed = _get_clones(self.bbox_embed, args.dec_layers)
             self.transformer.decoder.bbox_embed = self.bbox_embed
-            if self.args.rpn:
-                self.transformer.stage1_box_embed = self.stage1_box_embed
-                self.transformer.stage1_obj_embed = self.stage1_obj_embed
         else:
             self.bbox_embed = _get_clones(self.bbox_embed, 1)
 
@@ -155,8 +151,9 @@ class FastDETR(nn.Module):
 
         if self.args.binary_token:
             # 100个正proposal 100个负proposal
-            self.num_cls_keys = 120
-            self.num_neg_keys = self.num_cls_keys
+            self.num_cls_keys = self.args.num_cls_keys
+            self.num_neg_keys = self.args.num_neg_keys
+            # self.num_neg_keys = self.num_cls_keys
             self.value_fg = nn.Embedding(1, 256)
             self.value_bg = nn.Embedding(1, 256)
             self.key_neg_posi = nn.Embedding(self.num_neg_keys, 4)
