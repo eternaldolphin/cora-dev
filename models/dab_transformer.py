@@ -81,6 +81,7 @@ class Transformer(nn.Module):
         dim_feedforward = args.dim_feedforward
         num_encoder_layers = args.enc_layers
         num_decoder_layers = args.dec_layers
+        num_t2vencoder_layers = args.t2venc_layers
         normalize_before = False
         return_intermediate_dec = True
         query_dim = 4
@@ -102,11 +103,11 @@ class Transformer(nn.Module):
             t2v_encoder_layer = T2V_TransformerEncoderLayer(d_model, nhead, dim_feedforward,
                                                     dropout, activation, normalize_before)
             encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
-            self.t2v_encoder = TransformerEncoder(t2v_encoder_layer, num_encoder_layers, encoder_norm, binary_token=True, t2v_encoder=True)
+            self.t2v_encoder = TransformerEncoder(t2v_encoder_layer, num_t2vencoder_layers, encoder_norm, t2v_encoder=True)
         encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
                                                 dropout, activation, normalize_before, use_deformable_attention=use_deformable_attention)
         encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
-        self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm, binary_token=(args.binary_token and not args.t2v_encoder))
+        self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm, mix_encoder=args.mix_encoder)
 
         decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
                                                 dropout, activation, normalize_before, keep_query_pos=keep_query_pos, use_deformable_attention=use_deformable_attention and not args.only_deform_enc)
@@ -200,14 +201,10 @@ class Transformer(nn.Module):
                 image_length=image_length, value_binary=value_binary)  # (L, batch_size, d)
             memory = src[:image_length]
             mask = mask[:, :image_length]
-        else:
-            import ipdb;ipdb.set_trace()
-            memory, key_position = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, shape=shape, valid_ratio=valid_ratio,
-                                  key_content=key_content, key_position=key_position, value_binary=value_binary)# ->[4150, 2, 256]
-            import ipdb;ipdb.set_trace()
-            if key_position is not None:
-                num_queries = refpoint_embed.shape[0]# 1000
-                refpoint_embed = key_position[:num_queries]
+        
+        memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, shape=shape, valid_ratio=valid_ratio,
+                                key_content=key_content, key_position=key_position, value_binary=value_binary)# ->[4150, 2, 256]
+
         if refpoint_embed is not None and not self.args.t2v_encoder:# [1000, 2, 4] train
             if refpoint_embed.dim() == 2:
                 refpoint_embed = refpoint_embed.unsqueeze(1).repeat(1, bs, 1)
@@ -228,7 +225,7 @@ class Transformer(nn.Module):
                 # select the topk proposals
                 selected_inds = logits.topk(k=self.stage1_box, dim=0)[1][:,:,0]
                 refpoint_embed = torch.gather(proposals, dim=0, index=selected_inds.unsqueeze(-1).expand(self.stage1_box, bs, 4))
-                classes, src_query, refpoint_embed, confidences = cls_func(refpoint_embed.detach())
+                classes, src_query, refpoint_embed, confidences, key_content, key_position, value_binary = cls_func(refpoint_embed.detach())
             else:
                 classes = None
                 out_dict = None
@@ -312,15 +309,15 @@ class T2V_TransformerEncoderLayer(nn.Module):
 
 class TransformerEncoder(nn.Module):
 
-    def __init__(self, encoder_layer, num_layers, norm=None, d_model=256, binary_token=False, t2v_encoder=False):
+    def __init__(self, encoder_layer, num_layers, norm=None, d_model=256, mix_encoder=False, t2v_encoder=False):
         super().__init__()
         self.layers = _get_clones(encoder_layer, num_layers)
         self.num_layers = num_layers
         self.query_scale = MLP(d_model, d_model, d_model, 2)
         self.norm = norm
-        self.binary_token = binary_token
+        self.mix_encoder = mix_encoder
         self.t2v_encoder = t2v_encoder
-        if self.binary_token and not self.t2v_encoder:
+        if self.mix_encoder:
             dim_feedforward = 1024
             dropout = 0.1
             self.nhead = 8
@@ -365,7 +362,7 @@ class TransformerEncoder(nn.Module):
             # import ipdb;ipdb.set_trace()
             pos = torch.cat((pos, key_sine_embed))
         for layer_id, layer in enumerate(self.layers):
-            if self.binary_token and not self.t2v_encoder:
+            if self.mix_encoder:
                 # image tokens & class tokens cross attention(CA) with fg/bg value
                 # tgt/query: output query_pos: pos*pos_scales
                 # memory/key: key_content=[key_pos, key_neg] pos: key_position=[key_pos_pos, key_neg_pos]
@@ -400,7 +397,7 @@ class TransformerEncoder(nn.Module):
                             src_key_padding_mask=src_key_padding_mask, pos=pos*pos_scales, shape=shape, valid_ratio=valid_ratio)# ->[4150, 2, 256]
             #为什么这个pos要x pos_scales
 
-            if self.binary_token and not self.t2v_encoder:
+            if self.mix_encoder:
                 # ========== Begin of Cross-Attention =============
                 # Apply projections here
                 # shape: num_queries x batch_size x 256

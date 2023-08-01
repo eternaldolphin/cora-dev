@@ -347,6 +347,9 @@ class FastDETR(nn.Module):
             query_features = None
             classes_ = None
             confidences = None
+            key_content = None 
+            key_position = None 
+            value_binary = None
 
         used_pos_embed = [pos_embeds[self.args.backbone_feature]]
         hs, reference, memory, classes_temp, out_dict, confidences_ = self.transformer(srcs, masks, 

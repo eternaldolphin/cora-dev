@@ -102,6 +102,7 @@ def get_args_parser():
 
     # * Transformer
     parser.add_argument('--enc_layers', default=6, type=int, help="Number of encoding layers in the transformer")
+    parser.add_argument('--t2venc_layers', default=3, type=int, help="Number of t2vencoding layers in the transformer")
     parser.add_argument('--dec_layers', default=6, type=int, help="Number of decoding layers in the transformer")
     parser.add_argument('--dim_feedforward', default=2048, type=int, help="dimension of the FFN in the transformer")
     parser.add_argument('--hidden_dim', default=256, type=int, help="dimension of the transformer")
@@ -166,6 +167,7 @@ def get_args_parser():
     parser.add_argument('--sam_proposal', action='store_true')
     parser.add_argument('--binary_token', action='store_true')
     parser.add_argument('--t2v_encoder', action='store_true')
+    parser.add_argument('--mix_encoder', action='store_true')# 与t2v不同时出现
     parser.add_argument('--num_cls_keys', default=120, type=int)
     parser.add_argument('--num_neg_keys', default=10, type=int)
 
