@@ -169,7 +169,8 @@ def get_args_parser():
     parser.add_argument('--t2v_encoder', action='store_true')
     parser.add_argument('--mix_encoder', action='store_true')# 与t2v不同时出现
     parser.add_argument('--num_cls_keys', default=120, type=int)
-    parser.add_argument('--num_neg_keys', default=10, type=int)
+    parser.add_argument('--num_neg_keys', default=20, type=int)
+    parser.add_argument('--num_neg_train', default=10, type=int)
     parser.add_argument('--t2v_rpn', action='store_true')
 
     # distributed training parameters

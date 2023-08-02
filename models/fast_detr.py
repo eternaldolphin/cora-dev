@@ -153,10 +153,12 @@ class FastDETR(nn.Module):
             # 100个正proposal 100个负proposal
             self.num_cls_keys = self.args.num_cls_keys
             self.num_neg_keys = self.args.num_neg_keys
+            self.num_neg_train = self.args.num_neg_train
             # self.num_neg_keys = self.num_cls_keys
             self.value_fg = nn.Embedding(1, 256)
             self.value_bg = nn.Embedding(1, 256)
             self.key_neg_posi = nn.Embedding(self.num_neg_keys, 4)
+            self.key_neg_trainable = nn.Embedding(self.num_neg_train, 256)
             
 
     def forward(self, samples: NestedTensor, categories, gt_classes=None, targets=None, split_class=False):
@@ -331,11 +333,10 @@ class FastDETR(nn.Module):
                         k_pos_class = classes_[b][keep]# 150
                         # change1: add novel text embedding to bg embedding 
                         k_neg_class = [c for c in range(ori_projected_text.size(0)) if c not in k_pos_class]
-
-                        k_neg_classes = random.sample(k_neg_class, min(self.num_neg_keys, len(k_neg_class)))
-                        while len(k_neg_classes) < self.num_neg_keys: k_neg_classes.append(random.choice(k_neg_class))
-
-                        key_neg_cont.append(ori_projected_text[k_neg_classes])
+                        # change1: add trainble bg tokens
+                        k_neg_classes = random.sample(k_neg_class, min(self.num_neg_keys-self.num_neg_train, len(k_neg_class)))
+                        while len(k_neg_classes) < self.num_neg_keys-self.num_neg_train: k_neg_classes.append(random.choice(k_neg_class))
+                        key_neg_cont.append(torch.cat((ori_projected_text[k_neg_classes], self.key_neg_trainable.weight)))
                     key_pos_cont = torch.stack(key_pos_cont)# [2, 100, 256]
                     key_neg_cont = torch.stack(key_neg_cont)# [2, 100, 256]
                     key_content = torch.cat((key_pos_cont, key_neg_cont), dim=1)# [2, 200, 256]
