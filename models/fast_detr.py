@@ -217,14 +217,9 @@ class FastDETR(nn.Module):
                     roi_features = self._sample_feature(sizes, query.sigmoid().permute(1,0,2), src_feature.tensors, extra_conv=False, box_emb=box_emb)
                     # [2, 1000, 1024]          = , [2, 1000, 4], [4, 2048, 32, 27], 
                     # classify the proposals
-                    # change1: add novel text embedding to bg embedding TODO
+                    # change1: add novel text embedding to bg embedding
                     categories = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard', 'kite', 'skateboard', 'surfboard', 'bottle', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot', 'pizza', 'donut', 'cake', 'chair', 'couch', 'bed', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'toothbrush']
-                    ori_text_feature = self.classifier(categories)# ->[65, 1024]
-                    target_index = [4, 5, 11, 12, 15, 16, 21, 23, 27, 29, 32, 34, 45, 47, 54, 58, 63]
-                    base_index = [i for i in range(65) if i not in target_index]
-                    text_feature = ori_text_feature[base_index]# [48, 1024]
-                    novel_feature = ori_text_feature[target_index]# [17, 1024]
-                    ori_text_feature = torch.cat((text_feature, novel_feature))# [65, 1024]
+                    text_feature = self.classifier(categories)
 
                 if split_class:# 有一定概率是true/false
                     # split class
@@ -319,9 +314,7 @@ class FastDETR(nn.Module):
                     # nms + topk proposal
                     from torchvision.ops.boxes import nms
                     import random
-                    ori_projected_text = self.text_proj(ori_text_feature)
-                    # change1: add novel text embedding to bg embedding
-                    projected_text = ori_projected_text[:48]
+                    projected_text = self.text_proj(text_feature)
 
                     key_pos_cont = []
                     key_neg_cont = []
@@ -332,11 +325,11 @@ class FastDETR(nn.Module):
                         key_pos_posi.append(query[:, b, :][keep])# [100, 4]
                         k_pos_class = classes_[b][keep]# 150
                         # change1: add novel text embedding to bg embedding 
-                        k_neg_class = [c for c in range(ori_projected_text.size(0)) if c not in k_pos_class]
+                        k_neg_class = [c for c in range(projected_text.size(0)) if c not in k_pos_class]
                         # change1: add trainble bg tokens
                         k_neg_classes = random.sample(k_neg_class, min(self.num_neg_keys-self.num_neg_train, len(k_neg_class)))
                         while len(k_neg_classes) < self.num_neg_keys-self.num_neg_train: k_neg_classes.append(random.choice(k_neg_class))
-                        key_neg_cont.append(torch.cat((ori_projected_text[k_neg_classes], self.key_neg_trainable.weight)))
+                        key_neg_cont.append(torch.cat((projected_text[k_neg_classes], self.key_neg_trainable.weight)))
                     key_pos_cont = torch.stack(key_pos_cont)# [2, 100, 256]
                     key_neg_cont = torch.stack(key_neg_cont)# [2, 100, 256]
                     key_content = torch.cat((key_pos_cont, key_neg_cont), dim=1)# [2, 200, 256]
