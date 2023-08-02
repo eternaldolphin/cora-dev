@@ -213,7 +213,7 @@ class Transformer(nn.Module):
             classes = None
             out_dict = None
             confidences = None
-            if self.args.t2v_encoder:
+            if self.args.t2v_rpn:
                 # firstly forward the rpn
                 proposals, logits = self.gen_encoder_output_proposals(memory, mask, size=(h, w))
                 # create a dict
@@ -243,6 +243,9 @@ class Transformer(nn.Module):
         if self.num_patterns == 0:
             if src_query is not None:# train
                 tgt = src_query.permute(1,0,2)
+                if self.args.binary_token:
+                    tgt = value_binary[0].repeat(num_queries, 1, 1)
+                    tgt = tgt + src_query.permute(1,0,2)
             else:
                 if self.args.binary_token:
                     tgt = value_binary[0].repeat(num_queries, 1, 1)# TODO:用detach吗？

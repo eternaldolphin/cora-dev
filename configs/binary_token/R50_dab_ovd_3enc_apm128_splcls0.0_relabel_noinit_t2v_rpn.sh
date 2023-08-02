@@ -31,7 +31,7 @@ args=" \
 --target_class_factor 8 \
 --binary_token \
 --t2v_encoder \
---rpn \
+--t2v_rpn \
 "
 
 eval "$header$args$extra_args 2>&1 | tee -a $work_dir/exp_$now.txt"

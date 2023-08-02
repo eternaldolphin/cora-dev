@@ -63,7 +63,7 @@ class FastDETR(nn.Module):
 
         # Instead of modeling query_embed as learnable parameters in the shape of (num_queries, d_model),
         # we directly model reference boxes in the shape of (num_queries, 4), in the format of (xc yc w h).
-        if not self.args.rpn or self.args.t2v_encoder:
+        if not self.args.rpn:
             self.query_embed = nn.Embedding(self.num_queries, 4)           # Reference boxes
         else:
             self.query_embed = None
@@ -187,7 +187,7 @@ class FastDETR(nn.Module):
         srcs = [self.input_proj[0](src)]# 1024->256 list=1 [2, 256, 54, 75]
         masks = [mask]
         assert mask is not None
-        if not self.args.rpn or self.args.t2v_encoder:
+        if not self.args.rpn:
             query = self.query_embed.weight# [1000, 4]
             query = query.unsqueeze(1).expand(-1, srcs[0].size(0), -1)# [1000, 2, 4]
         else:
@@ -215,8 +215,15 @@ class FastDETR(nn.Module):
                     roi_features = self._sample_feature(sizes, query.sigmoid().permute(1,0,2), src_feature.tensors, extra_conv=False, box_emb=box_emb)
                     # [2, 1000, 1024]          = , [2, 1000, 4], [4, 2048, 32, 27], 
                     # classify the proposals
-                    text_feature = self.classifier(categories)# ->[65, 1024]
-                
+                    # change1: add novel text embedding to bg embedding TODO
+                    categories = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard', 'kite', 'skateboard', 'surfboard', 'bottle', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot', 'pizza', 'donut', 'cake', 'chair', 'couch', 'bed', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'toothbrush']
+                    ori_text_feature = self.classifier(categories)# ->[65, 1024]
+                    target_index = [4, 5, 11, 12, 15, 16, 21, 23, 27, 29, 32, 34, 45, 47, 54, 58, 63]
+                    base_index = [i for i in range(65) if i not in target_index]
+                    text_feature = ori_text_feature[base_index]# [48, 1024]
+                    novel_feature = ori_text_feature[target_index]# [17, 1024]
+                    ori_text_feature = torch.cat((text_feature, novel_feature))# [65, 1024]
+
                 if split_class:# 有一定概率是true/false
                     # split class
                     split_mask = torch.rand_like(text_feature[:,0]) > 0.5# [65] [False,  True,  True, False, F..
@@ -310,7 +317,10 @@ class FastDETR(nn.Module):
                     # nms + topk proposal
                     from torchvision.ops.boxes import nms
                     import random
-                    projected_text = self.text_proj(text_feature)
+                    ori_projected_text = self.text_proj(ori_text_feature)
+                    # change1: add novel text embedding to bg embedding
+                    projected_text = ori_projected_text[:48]
+
                     key_pos_cont = []
                     key_neg_cont = []
                     key_pos_posi = []
@@ -319,28 +329,34 @@ class FastDETR(nn.Module):
                         key_pos_cont.append(projected_text[used_classes_[b][keep]])# [100, 1024]
                         key_pos_posi.append(query[:, b, :][keep])# [100, 4]
                         k_pos_class = classes_[b][keep]# 150
-                        k_neg_class = [c for c in range(projected_text.size(0)) if c not in k_pos_class]
+                        # change1: add novel text embedding to bg embedding 
+                        k_neg_class = [c for c in range(ori_projected_text.size(0)) if c not in k_pos_class]
 
                         k_neg_classes = random.sample(k_neg_class, min(self.num_neg_keys, len(k_neg_class)))
                         while len(k_neg_classes) < self.num_neg_keys: k_neg_classes.append(random.choice(k_neg_class))
 
-                        key_neg_cont.append(projected_text[k_neg_classes])
+                        key_neg_cont.append(ori_projected_text[k_neg_classes])
                     key_pos_cont = torch.stack(key_pos_cont)# [2, 100, 256]
                     key_neg_cont = torch.stack(key_neg_cont)# [2, 100, 256]
                     key_content = torch.cat((key_pos_cont, key_neg_cont), dim=1)# [2, 200, 256]
                     key_pos_posi = torch.stack(key_pos_posi)# [2, 100, 4]
                     key_neg_posi = self.key_neg_posi.weight.unsqueeze(0).repeat(key_content.shape[0], 1, 1)# [2, 100, 4]
+                    # change1: keep bg position zeros
+                    key_neg_posi = torch.zeros_like(key_neg_posi)# TODO: 参数是否有梯度
                     key_position = torch.cat((key_pos_posi, key_neg_posi), dim=1)# [2, 200, 4]
                     value_binary = torch.cat((self.value_fg.weight.repeat(self.num_cls_keys, 1), 
                                               self.value_bg.weight.repeat(self.num_neg_keys, 1)), dim=0)# [200, 256]
                     value_binary = value_binary.unsqueeze(0).repeat(key_content.shape[0], 1, 1)# [2, 200, 256]
+                    # change1: add value to key to prompt similarity in deeper layers
+                    key_content = key_content + value_binary
                     key_content = key_content.transpose(0, 1)
                     key_position = key_position.transpose(0, 1)
                     value_binary = value_binary.transpose(0, 1)
+                    # change1: add query_features at decoder to prompt similarity
                     query_features = None
             return classes_, query_features, query, confidences, key_content, key_position, value_binary# [2, 1000] [2, 1000, 256] [1000, 2, 4] None// split class [4, 1000] [4, 1000, 256] [1000, 4, 4] None
             # split class [4, 1000] None [1000, 4, 4] None
-        if not self.args.rpn or self.args.t2v_encoder:
+        if not self.args.rpn:
             # import ipdb;ipdb.set_trace()
             classes_, query_features, query, confidences, key_content, key_position, value_binary = get_query_and_mask(query)# [1000, 2, 4]->[2, 1000] [2, 1000, 256] [1000, 2, 4] None
         else:
