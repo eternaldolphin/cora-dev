@@ -197,15 +197,15 @@ class Transformer(nn.Module):
         if self.args.t2v_encoder:
             image_length = src.shape[0]# [4150, 2, 256] -> 4150
             src = torch.cat((src, key_content))# [4150, 2, 256] [240, 2, 256] -> [4390, 2, 256]
-            src, _ = self.t2v_encoder(src, src_key_padding_mask=mask, pos=pos_embed, key_position=key_position, 
+            src = self.t2v_encoder(src, src_key_padding_mask=mask, pos=pos_embed, key_position=key_position, 
                 image_length=image_length, value_binary=value_binary)  # (L, batch_size, d)
-            memory = src[:image_length]
+            src = src[:image_length]
+            memory = src
             mask = mask[:, :image_length]
-        
         memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, shape=shape, valid_ratio=valid_ratio,
                                 key_content=key_content, key_position=key_position, value_binary=value_binary)# ->[4150, 2, 256]
 
-        if refpoint_embed is not None and not self.args.t2v_encoder:# [1000, 2, 4] train
+        if refpoint_embed is not None:# [1000, 2, 4] train
             if refpoint_embed.dim() == 2:
                 refpoint_embed = refpoint_embed.unsqueeze(1).repeat(1, bs, 1)
             else:
@@ -213,6 +213,11 @@ class Transformer(nn.Module):
             classes = None
             out_dict = None
             confidences = None
+            if self.args.t2v_encoder:
+                # firstly forward the rpn
+                proposals, logits = self.gen_encoder_output_proposals(memory, mask, size=(h, w))
+                # create a dict
+                out_dict = {'pred_logits': logits.permute(1,0,2), 'pred_boxes': proposals.permute(1,0,2).sigmoid()}
         else:
             assert tgt_mask is None
             assert src_query is None
@@ -221,15 +226,10 @@ class Transformer(nn.Module):
             proposals, logits = self.gen_encoder_output_proposals(memory, mask, size=(h, w))
             # create a dict
             out_dict = {'pred_logits': logits.permute(1,0,2), 'pred_boxes': proposals.permute(1,0,2).sigmoid()}
-            if not self.args.t2v_encoder:
-                # select the topk proposals
-                selected_inds = logits.topk(k=self.stage1_box, dim=0)[1][:,:,0]
-                refpoint_embed = torch.gather(proposals, dim=0, index=selected_inds.unsqueeze(-1).expand(self.stage1_box, bs, 4))
-                classes, src_query, refpoint_embed, confidences, key_content, key_position, value_binary = cls_func(refpoint_embed.detach())
-            else:
-                classes = None
-                out_dict = None
-                confidences = None
+            # select the topk proposals
+            selected_inds = logits.topk(k=self.stage1_box, dim=0)[1][:,:,0]
+            refpoint_embed = torch.gather(proposals, dim=0, index=selected_inds.unsqueeze(-1).expand(self.stage1_box, bs, 4))
+            classes, src_query, refpoint_embed, confidences, key_content, key_position, value_binary = cls_func(refpoint_embed.detach())
             
 
         # in case of split_class

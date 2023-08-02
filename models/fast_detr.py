@@ -63,7 +63,7 @@ class FastDETR(nn.Module):
 
         # Instead of modeling query_embed as learnable parameters in the shape of (num_queries, d_model),
         # we directly model reference boxes in the shape of (num_queries, 4), in the format of (xc yc w h).
-        if not self.args.rpn:
+        if not self.args.rpn or self.args.t2v_encoder:
             self.query_embed = nn.Embedding(self.num_queries, 4)           # Reference boxes
         else:
             self.query_embed = None
@@ -187,7 +187,7 @@ class FastDETR(nn.Module):
         srcs = [self.input_proj[0](src)]# 1024->256 list=1 [2, 256, 54, 75]
         masks = [mask]
         assert mask is not None
-        if not self.args.rpn:
+        if not self.args.rpn or self.args.t2v_encoder:
             query = self.query_embed.weight# [1000, 4]
             query = query.unsqueeze(1).expand(-1, srcs[0].size(0), -1)# [1000, 2, 4]
         else:
@@ -340,7 +340,7 @@ class FastDETR(nn.Module):
                     query_features = None
             return classes_, query_features, query, confidences, key_content, key_position, value_binary# [2, 1000] [2, 1000, 256] [1000, 2, 4] None// split class [4, 1000] [4, 1000, 256] [1000, 4, 4] None
             # split class [4, 1000] None [1000, 4, 4] None
-        if not self.args.rpn:
+        if not self.args.rpn or self.args.t2v_encoder:
             # import ipdb;ipdb.set_trace()
             classes_, query_features, query, confidences, key_content, key_position, value_binary = get_query_and_mask(query)# [1000, 2, 4]->[2, 1000] [2, 1000, 256] [1000, 2, 4] None
         else:
