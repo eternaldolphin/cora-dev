@@ -243,9 +243,6 @@ class Transformer(nn.Module):
         if self.num_patterns == 0:
             if src_query is not None:# train
                 tgt = src_query.permute(1,0,2)
-                if self.args.binary_token:
-                    tgt = value_binary[0].repeat(num_queries, 1, 1)
-                    tgt = tgt + src_query.permute(1,0,2)
             else:
                 if self.args.binary_token:
                     tgt = value_binary[0].repeat(num_queries, 1, 1)# TODO:用detach吗？

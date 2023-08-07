@@ -71,7 +71,7 @@ class HungarianMatcher(nn.Module):
         gamma = 2.0
         neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())# [2000, 1]
         pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())# [2000, 1]
-        cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]# [2000, 4]
+        cost_class = pos_cost_class[:, tgt_ids] - neg_cost_class[:, tgt_ids]# [2000, 4][2000, 19]
 
         # Compute the L1 cost between boxes
         cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)# [2000, 4] [4, 4] -> [2000, 4]
@@ -97,7 +97,6 @@ class HungarianMatcher(nn.Module):
             keep = batched_nms(box_cxcywh_to_xyxy(box), score, torch.zeros_like(score), 0.5)
             ignore.append(ignore_idx[keep])
             
-        # import ipdb;ipdb.set_trace()
         if 'proposal_classes' in outputs:# val ['pred_logits', 'pred_boxes', 'proposal', 'proposal_classes', 'use_nms']
             ori_tgt_ids = torch.cat([v["ori_labels"] for v in targets])# tensor([50, 50, 46, 46, 46, 46,  0,  0, 55, 59, 60, 60, 61, 62, 62, 46, 62, 62, 17], device='cuda:0')
             batch_idx = torch.cat([torch.zeros_like(v["ori_labels"]) + i for i, v in enumerate(targets)])# tensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], device='cuda:0')

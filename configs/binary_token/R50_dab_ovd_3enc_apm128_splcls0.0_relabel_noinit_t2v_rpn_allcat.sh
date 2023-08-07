@@ -4,7 +4,7 @@ name=$0
 args=" \
 --coco_path 'data/coco' \
 --output_dir $work_dir \
---batch_size 2 \
+--batch_size 4 \
 --epochs 35 \
 --lr_drop 35 \
 --backbone clip_RN50 \
@@ -18,7 +18,7 @@ args=" \
 --anchor_pre_matching \
 --remove_misclassified \
 --condition_on_text \
---enc_layers 3 \
+--enc_layers 0 \
 --t2venc_layers 3 \
 --text_dim 1024 \
 --condition_bottleneck 128 \
@@ -31,6 +31,8 @@ args=" \
 --target_class_factor 8 \
 --binary_token \
 --t2v_encoder \
+--t2v_rpn \
+--allcat \
 "
 
 eval "$header$args$extra_args 2>&1 | tee -a $work_dir/exp_$now.txt"

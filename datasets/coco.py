@@ -256,6 +256,8 @@ def build(image_set, args):
             PATHS['train'] = (root / "train2017", root / "annotations" / f'{mode}_train2017_base_RN50x4relabel_coconames.json')
         elif args.label_version == 'RN50base':
             PATHS['train'] = (root / "train2017", root / "annotations" / f'{mode}_train2017_base_RN50relabel.json')
+            if args.allcat:
+                PATHS['train'] = (root / "train2017", root / "annotations" / f'{mode}_train2017_base_RN50relabel_allcat.json')
         elif args.label_version == 'small_RN50base':
             PATHS['train'] = (root / "train2017", root / "annotations" / f'{mode}_train2017_base_small_RN50relabel.json')
         elif args.label_version == 'small_drop':

@@ -4,7 +4,7 @@ name=$0
 args=" \
 --coco_path 'data/coco' \
 --output_dir $work_dir \
---batch_size 2 \
+--batch_size 4 \
 --epochs 35 \
 --lr_drop 35 \
 --backbone clip_RN50 \
@@ -16,9 +16,8 @@ args=" \
 --use_nms \
 --num_queries 1000 \
 --anchor_pre_matching \
---remove_misclassified \
 --condition_on_text \
---enc_layers 3 \
+--enc_layers 0 \
 --t2venc_layers 3 \
 --text_dim 1024 \
 --condition_bottleneck 128 \

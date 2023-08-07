@@ -153,12 +153,10 @@ class FastDETR(nn.Module):
             # 100个正proposal 100个负proposal
             self.num_cls_keys = self.args.num_cls_keys
             self.num_neg_keys = self.args.num_neg_keys
-            self.num_neg_train = self.args.num_neg_train
             # self.num_neg_keys = self.num_cls_keys
             self.value_fg = nn.Embedding(1, 256)
             self.value_bg = nn.Embedding(1, 256)
             self.key_neg_posi = nn.Embedding(self.num_neg_keys, 4)
-            self.key_neg_trainable = nn.Embedding(self.num_neg_train, 256)
             
 
     def forward(self, samples: NestedTensor, categories, gt_classes=None, targets=None, split_class=False):
@@ -217,8 +215,6 @@ class FastDETR(nn.Module):
                     roi_features = self._sample_feature(sizes, query.sigmoid().permute(1,0,2), src_feature.tensors, extra_conv=False, box_emb=box_emb)
                     # [2, 1000, 1024]          = , [2, 1000, 4], [4, 2048, 32, 27], 
                     # classify the proposals
-                    # change1: add novel text embedding to bg embedding
-                    categories = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard', 'kite', 'skateboard', 'surfboard', 'bottle', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot', 'pizza', 'donut', 'cake', 'chair', 'couch', 'bed', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'toothbrush']
                     text_feature = self.classifier(categories)
 
                 if split_class:# 有一定概率是true/false
@@ -288,6 +284,18 @@ class FastDETR(nn.Module):
                         classes_ = outputs_class.topk(dim=-1, k=self.args.topk_matching)[1]
                     classes_, indices = classes_.sort(-1)# [2, 1000] [2, 1000] // split class: [4, 1000] [4, 1000]
                     indices = indices.permute(1,0).unsqueeze(-1).expand(indices.size(1), indices.size(0), 4)# [1000, 2, 4]// split class: [1000, 4, 4]
+                
+                # allcat but decoder 48
+                if self.args.binary_token and self.args.allcat:
+                    target_index = [4, 5, 11, 12, 15, 16, 21, 23, 27, 29, 32, 34, 45, 47, 54, 58, 63]
+                    base_index = [i for i in range(65) if i not in target_index]
+                    dec_output_class = outputs_class[..., base_index]# [4, 1000, 48]
+                    dec_classes_ = dec_output_class.max(-1)[1]# [4, 1000]
+                    dec_scores_ = dec_output_class.max(-1)[0]# [2, 1000]
+                    for i in range(48): dec_classes_[dec_classes_ == i] = base_index[i]
+                    dec_classes_, dec_indices = dec_classes_.sort(-1)# [2, 1000] [2, 1000] // split class: [4, 1000] [4, 1000]
+                    dec_indices = dec_indices.permute(1,0).unsqueeze(-1).expand(dec_indices.size(1), dec_indices.size(0), 4)# [1000, 2, 4]// split class: [1000, 4, 4]
+                    dec_query = torch.gather(query, 0, dec_indices)
                 query = torch.gather(query, 0, indices)# -> [1000, 2, 4] // split class: [1000, 4, 4]
                 sa_mask = None
                 if self.args.condition_on_text:
@@ -320,34 +328,37 @@ class FastDETR(nn.Module):
                     key_neg_cont = []
                     key_pos_posi = []
                     for b in range(query.shape[1]):
-                        keep = nms(query[:, b, :], scores_[b], 0.7)[:self.num_cls_keys]# [1000, 4] [1000]->[100]
-                        key_pos_cont.append(projected_text[used_classes_[b][keep]])# [100, 1024]
-                        key_pos_posi.append(query[:, b, :][keep])# [100, 4]
-                        k_pos_class = classes_[b][keep]# 150
-                        # change1: add novel text embedding to bg embedding 
+                        if self.args.allcat:
+                            keep = nms(dec_query[:, b, :], dec_scores_[b], 0.7)[:self.num_cls_keys]# [1000, 4] [1000]->[100]
+                            key_pos_cont.append(projected_text[dec_classes_[b][keep]])# [100, 1024]
+                            key_pos_posi.append(dec_query[:, b, :][keep])# [100, 4]
+                            k_pos_class = dec_classes_[b][keep]# 150
+                        else:
+                            keep = nms(query[:, b, :], scores_[b], 0.7)[:self.num_cls_keys]# [1000, 4] [1000]->[100]
+                            key_pos_cont.append(projected_text[used_classes_[b][keep]])# [100, 1024]
+                            key_pos_posi.append(query[:, b, :][keep])# [100, 4]
+                            k_pos_class = classes_[b][keep]# 150
                         k_neg_class = [c for c in range(projected_text.size(0)) if c not in k_pos_class]
-                        # change1: add trainble bg tokens
-                        k_neg_classes = random.sample(k_neg_class, min(self.num_neg_keys-self.num_neg_train, len(k_neg_class)))
-                        while len(k_neg_classes) < self.num_neg_keys-self.num_neg_train: k_neg_classes.append(random.choice(k_neg_class))
-                        key_neg_cont.append(torch.cat((projected_text[k_neg_classes], self.key_neg_trainable.weight)))
+                        k_neg_classes = random.sample(k_neg_class, min(self.num_neg_keys, len(k_neg_class)))
+                        while len(k_neg_classes) < self.num_neg_keys: k_neg_classes.append(random.choice(k_neg_class))
+                        key_neg_cont.append(projected_text[k_neg_classes])
                     key_pos_cont = torch.stack(key_pos_cont)# [2, 100, 256]
                     key_neg_cont = torch.stack(key_neg_cont)# [2, 100, 256]
                     key_content = torch.cat((key_pos_cont, key_neg_cont), dim=1)# [2, 200, 256]
                     key_pos_posi = torch.stack(key_pos_posi)# [2, 100, 4]
                     key_neg_posi = self.key_neg_posi.weight.unsqueeze(0).repeat(key_content.shape[0], 1, 1)# [2, 100, 4]
-                    # change1: keep bg position zeros
-                    key_neg_posi = torch.zeros_like(key_neg_posi)# TODO: 参数是否有梯度
                     key_position = torch.cat((key_pos_posi, key_neg_posi), dim=1)# [2, 200, 4]
                     value_binary = torch.cat((self.value_fg.weight.repeat(self.num_cls_keys, 1), 
                                               self.value_bg.weight.repeat(self.num_neg_keys, 1)), dim=0)# [200, 256]
                     value_binary = value_binary.unsqueeze(0).repeat(key_content.shape[0], 1, 1)# [2, 200, 256]
-                    # change1: add value to key to prompt similarity in deeper layers
-                    key_content = key_content + value_binary
                     key_content = key_content.transpose(0, 1)
                     key_position = key_position.transpose(0, 1)
                     value_binary = value_binary.transpose(0, 1)
-                    # change1: add query_features at decoder to prompt similarity
-                    query_features = None
+                    query_features = None# binary token用前景
+
+                    if self.args.allcat:
+                        classes_ = dec_classes_
+                        query = dec_query
             return classes_, query_features, query, confidences, key_content, key_position, value_binary# [2, 1000] [2, 1000, 256] [1000, 2, 4] None// split class [4, 1000] [4, 1000, 256] [1000, 4, 4] None
             # split class [4, 1000] None [1000, 4, 4] None
         if not self.args.rpn:
