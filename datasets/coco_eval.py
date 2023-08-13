@@ -24,7 +24,7 @@ from util.misc import all_gather
 
 
 class CocoEvaluator(object):
-    def __init__(self, coco_gt, iou_types, label2cat=None):
+    def __init__(self, coco_gt, iou_types, label2cat=None, args=None):
         assert isinstance(iou_types, (list, tuple))
         coco_gt = copy.deepcopy(coco_gt)
         self.coco_gt = coco_gt
@@ -35,11 +35,25 @@ class CocoEvaluator(object):
             self.coco_eval[iou_type] = COCOeval(coco_gt, iouType=iou_type)
             
         self.label2catid = label2cat
-        self.base_catids = [\
-            70, 2, 53, 7, 73, 57, 4, 79, 62, 74, 9, 38, 20, 19, 54, 85, \
-            72, 27, 80, 51, 78, 15, 84, 55, 16, 59, 48, 34, 23, 86, 90, 50, \
-            25, 31, 56, 82, 75, 42, 3, 65, 52, 60, 35, 1, 8, 44, 33, 24]
-        self.target_catids = [28, 21, 47, 6, 76, 41, 18, 63, 32, 36, 81, 22, 61, 87, 5, 17, 49]
+        if args.label_type == 'fewshot':
+            self.base_catids = [
+                8, 10, 11, 13, 14, 15, 22, 23, 24, 25, 27, 28, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 46, 47,
+                48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 65, 70, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 84,
+                85, 86, 87, 88, 89, 90
+            ]
+            self.target_catids = [1, 2, 3, 4, 5, 6, 7, 9, 16, 17, 18, 19, 20, 21, 44, 62, 63, 64, 67, 72]
+        elif args.label_version == 'tiny':
+            self.base_catids = [\
+                70, 2, 53, 7, 73, 57, 4, 79, 62, 74, 9, 38, 20, 19, 54, \
+                72, 27, 80, 51, 78, 15, 55, 16, 59, 48, 34, 23, 50, \
+                25, 31, 56, 82, 75, 42, 3, 65, 52, 60, 35, 1, 8, 44, 33, 24]
+            self.target_catids = [28, 21, 47, 6, 76, 41, 18, 63, 32, 36, 81, 22, 61, 87, 5, 17, 49, 84,85,86,90]
+        else:
+            self.base_catids = [\
+                70, 2, 53, 7, 73, 57, 4, 79, 62, 74, 9, 38, 20, 19, 54, 85, \
+                72, 27, 80, 51, 78, 15, 84, 55, 16, 59, 48, 34, 23, 86, 90, 50, \
+                25, 31, 56, 82, 75, 42, 3, 65, 52, 60, 35, 1, 8, 44, 33, 24]
+            self.target_catids = [28, 21, 47, 6, 76, 41, 18, 63, 32, 36, 81, 22, 61, 87, 5, 17, 49]
 
         self.img_ids = []
         self.eval_imgs = {k: [] for k in iou_types}

@@ -227,7 +227,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             coco_evaluator = None
         else:
             iou_types = tuple(k for k in ('segm', 'bbox') if k in postprocessors.keys())
-            coco_evaluator = CocoEvaluator(base_ds, iou_types, label2cat=data_loader.dataset.label2catid)
+            coco_evaluator = CocoEvaluator(base_ds, iou_types, label2cat=data_loader.dataset.label2catid, args=args)
 
             panoptic_evaluator = None
             if 'panoptic' in postprocessors.keys():

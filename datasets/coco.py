@@ -26,7 +26,7 @@ class CocoDetection(torchvision.datasets.CocoDetection):
         base_sample_prob, repeat_factor_sampling, repeat_threshold, remove_base_pseudo_label):
         super(CocoDetection, self).__init__(img_folder, ann_file)
         self._transforms = transforms        
-        
+
         self.all_categories = {k['id']: k['name'] for k in self.coco.dataset['categories']}
         self.category_list = [self.all_categories[k] for k in sorted(self.all_categories.keys())]
         self.category_ids = {v: k for k, v in self.all_categories.items()}
@@ -322,6 +322,11 @@ def build(image_set, args):
         }
         if args.label_type == 'coco_nouns':
             PATHS['train'] = (root / "train2017", root / "annotations" / f'{mode}_train2017_base_coconouns.json')
+        if args.label_type == 'tiny':
+            PATHS["train"] = (root / "train2017", root / "annotations" / f'{mode}_train2017_base_tiny.json')
+        if args.label_type == 'fewshot':
+            PATHS["train"] = (root / "train2017", Path(args.coco_path + '_fewshot') / f'{mode}_train2017_base.json')
+            PATHS['val'] = (root / "val2017", root / "annotations" / f'{mode}_val2017.json')
         if args.export:
             PATHS['val'] = PATHS['train'] # export the annotated
     else:

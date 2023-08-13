@@ -2,7 +2,7 @@ name=$0
 . configs/controller.sh
 
 args=" \
---coco_path $data_path \
+--coco_path 'data/coco' \
 --output_dir $work_dir \
 --batch_size 4 \
 --epochs 5 \
