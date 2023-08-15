@@ -177,7 +177,7 @@ class Transformer(nn.Module):
         return valid_ratio
 
     def forward(self, src, mask, refpoint_embed, pos_embed, tgt_mask=None, src_query=None, cls_func=None,
-        key_content=None, key_position=None, value_binary=None):
+        key_content=None, key_position=None, value_prompt=None):
         # flatten NxCxHxW to HWxNxC
         assert len(src) == 1 and len(mask) == 1 and len(pos_embed) == 1
         src = src[0]
@@ -198,12 +198,14 @@ class Transformer(nn.Module):
             image_length = src.shape[0]# [4150, 2, 256] -> 4150
             src = torch.cat((src, key_content))# [4150, 2, 256] [240, 2, 256] -> [4390, 2, 256]
             src = self.t2v_encoder(src, src_key_padding_mask=mask, pos=pos_embed, 
-                key_content=key_content, key_position=key_position, image_length=image_length, value_binary=value_binary)  # (L, batch_size, d)
+                key_content=key_content, key_position=key_position, image_length=image_length, value_prompt=value_prompt)  # (L, batch_size, d)
             src = src[:image_length]
             memory = src
             mask = mask[:, :image_length]
         memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, shape=shape, valid_ratio=valid_ratio,
-                                key_content=key_content, key_position=key_position, value_binary=value_binary)# ->[4150, 2, 256]
+                                key_content=key_content, key_position=key_position, value_prompt=value_prompt)# ->[4150, 2, 256]
+        if self.args.text_prompt:
+            classes, src_query, refpoint_embed, confidences, key_content, key_position, value_prompt = cls_func(refpoint_embed.detach())
         if self.args.rpn_t2v:
             refpoint_embed = None
             src_query = None
@@ -231,7 +233,7 @@ class Transformer(nn.Module):
             # select the topk proposals
             selected_inds = logits.topk(k=self.stage1_box, dim=0)[1][:,:,0]
             refpoint_embed = torch.gather(proposals, dim=0, index=selected_inds.unsqueeze(-1).expand(self.stage1_box, bs, 4))
-            classes, src_query, refpoint_embed, confidences, key_content, key_position, value_binary = cls_func(refpoint_embed.detach())
+            classes, src_query, refpoint_embed, confidences, key_content, key_position, value_prompt = cls_func(refpoint_embed.detach())
             
 
         # in case of split_class
@@ -246,11 +248,11 @@ class Transformer(nn.Module):
             if src_query is not None:# train
                 tgt = src_query.permute(1,0,2)
                 if self.args.binary_token:
-                    tgt = value_binary[0].repeat(num_queries, 1, 1)
+                    tgt = value_prompt[0].repeat(num_queries, 1, 1)
                     tgt = tgt + src_query.permute(1,0,2)
             else:
                 if self.args.binary_token:
-                    tgt = value_binary[0].repeat(num_queries, 1, 1)# TODO:用detach吗？
+                    tgt = value_prompt[0].repeat(num_queries, 1, 1)# TODO:用detach吗？
                 else:
                     tgt = torch.zeros(num_queries, bs, self.d_model, device=refpoint_embed.device)# [1000, 2, 256]
                 if src.size(1) != refpoint_embed.size(1):# split class: [3700, 2, 256] [1000, 4, 4]
@@ -291,14 +293,14 @@ class T2V_TransformerEncoderLayer(nn.Module):
                 src_key_padding_mask: Optional[Tensor] = None,# [2, 4150]
                 pos: Optional[Tensor] = None,# [4390, 2, 256]
                 image_length=None,# 4150
-                value_binary=None,
+                value_prompt=None,
                 ):
         assert image_length is not None
         
         pos_src = self.with_pos_embed(src, pos)# -> [4390, 2, 256]
-        q, k, v = pos_src[0:image_length], pos_src[image_length:], value_binary# [4150, 2, 256] [240, 2, 256] [240, 2, 256]
+        q, k, v = pos_src[0:image_length], pos_src[image_length:], value_prompt# [4150, 2, 256] [240, 2, 256] [240, 2, 256]
         
-        qmask, kmask = src_key_padding_mask, torch.ones_like(src_key_padding_mask[:, :value_binary.shape[0]], dtype=torch.bool)# [2, 4150] [2, 240]
+        qmask, kmask = src_key_padding_mask, torch.ones_like(src_key_padding_mask[:, :value_prompt.shape[0]], dtype=torch.bool)# [2, 4150] [2, 240]
         # attn_mask = torch.matmul(qmask.unsqueeze(2).float(), kmask.unsqueeze(1).float()).bool().repeat(self.nhead, 1, 1)# [16, 4150, 240] TODO: Why?
         src2 = self.self_attn(q, k, value=v, attn_mask=None,
                               key_padding_mask=None)[0]# ->[4150, 2, 256]
@@ -358,7 +360,7 @@ class TransformerEncoder(nn.Module):
                 pos: Optional[Tensor] = None,
                 shape = None,
                 valid_ratio=None,
-                key_content=None, key_position=None, value_binary=None, image_length=None):
+                key_content=None, key_position=None, value_prompt=None, image_length=None):
         output = src
 
         if self.t2v_encoder:
@@ -404,7 +406,7 @@ class TransformerEncoder(nn.Module):
             pos_scales = self.query_scale(output)
             if self.t2v_encoder:
                 output = layer(output, src_mask=mask,
-                            src_key_padding_mask=src_key_padding_mask, pos=pos*pos_scales, image_length=image_length, value_binary=value_binary)# ->[4150, 2, 256]
+                            src_key_padding_mask=src_key_padding_mask, pos=pos*pos_scales, image_length=image_length, value_prompt=value_prompt)# ->[4150, 2, 256]
             else:
                 output = layer(output, src_mask=mask,
                             src_key_padding_mask=src_key_padding_mask, pos=pos*pos_scales, shape=shape, valid_ratio=valid_ratio)# ->[4150, 2, 256]
@@ -416,7 +418,7 @@ class TransformerEncoder(nn.Module):
                 # shape: num_queries x batch_size x 256
                 q_content = self.ca_qcontent_proj(output)# [4150, 2, 256]->[4150, 2, 256]
                 k_content = self.ca_kcontent_proj(key_content)# [200, 2, 256]->[200, 2, 256]
-                v = self.ca_v_proj(value_binary)# [200, 2, 256]->[200, 2, 256]
+                v = self.ca_v_proj(value_prompt)# [200, 2, 256]->[200, 2, 256]
                 num_queries, bs, n_model = k_content.shape# 200, 2, 256
                 hw, _, _ = q_content.shape# 4150 TODO:暂时删掉了split class
 
