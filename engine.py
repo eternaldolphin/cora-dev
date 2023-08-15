@@ -165,7 +165,7 @@ def train_one_epoch(model: torch.nn.Module,
         
         _cnt += 1
         if args.debug:
-            if _cnt % (15 * 4) == 0:
+            if _cnt % (15) == 0:
                 print("BREAK!"*5)
                 break
 
@@ -337,7 +337,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             
         _cnt += 1
         if args.debug:
-            if _cnt % (15 * 5) == 0:
+            if _cnt % (15) == 0:
                 print("BREAK!"*5)
                 break
 
