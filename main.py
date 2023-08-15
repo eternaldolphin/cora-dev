@@ -44,7 +44,7 @@ def get_args_parser():
     parser.add_argument('--frozen_weights', type=str, default=None,
                         help="Path to the pretrained model. If set, only the mask head will be trained")
     parser.add_argument('--multiscale', default=False, action='store_true')
-    parser.add_argument('--stage1_box', default=300, type=int)
+    parser.add_argument('--stage1_box', default=1000, type=int)
     parser.add_argument('--use_deformable_attention', action='store_true')
     parser.add_argument('--only_deform_enc', action='store_true')
     # * Backbone
@@ -170,6 +170,9 @@ def get_args_parser():
     parser.add_argument('--mix_encoder', action='store_true')# 与t2v不同时出现
     parser.add_argument('--num_cls_keys', default=120, type=int)
     parser.add_argument('--num_neg_keys', default=10, type=int)
+    parser.add_argument('--bg_class_key', action='store_true')
+     parser.add_argument('--rpn_t2v', action='store_true')
+     parser.add_argument('--rpn_loss', action='store_true')
 
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')

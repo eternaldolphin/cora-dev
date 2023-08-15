@@ -153,6 +153,10 @@ class FastDETR(nn.Module):
             # 100个正proposal 100个负proposal
             self.num_cls_keys = self.args.num_cls_keys
             self.num_neg_keys = self.args.num_neg_keys
+            if self.args.bg_class_key:
+                 self.num_neg_keys = self.args.num_neg_keys + 17
+            else:
+                 self.num_neg_keys = self.args.num_neg_keys
             # self.num_neg_keys = self.num_cls_keys
             self.value_fg = nn.Embedding(1, 256)
             self.value_bg = nn.Embedding(1, 256)
@@ -311,6 +315,10 @@ class FastDETR(nn.Module):
                     from torchvision.ops.boxes import nms
                     import random
                     projected_text = self.text_proj(text_feature)
+                    if self.args.bg_class_key:
+                        novel_categories = ['airplane', 'bus', 'cat', 'dog', 'cow', 'elephant', 'umbrella', 'tie', 'snowboard', 'skateboard', 'cup', 'knife', 'cake', 'couch', 'keyboard', 'sink', 'scissors']
+                        text_feature_novel = self.classifier(novel_categories)# ->[17, 1024]
+                        projected_text_novel = self.text_proj(text_feature_novel)# [17, 256]
                     key_pos_cont = []
                     key_neg_cont = []
                     key_pos_posi = []
@@ -334,6 +342,8 @@ class FastDETR(nn.Module):
                     value_binary = torch.cat((self.value_fg.weight.repeat(self.num_cls_keys, 1), 
                                               self.value_bg.weight.repeat(self.num_neg_keys, 1)), dim=0)# [200, 256]
                     value_binary = value_binary.unsqueeze(0).repeat(key_content.shape[0], 1, 1)# [2, 200, 256]
+                    if self.args.bg_class_key and self.training:
+                        key_content[:, -17:, :] = projected_text_novel
                     key_content = key_content.transpose(0, 1)
                     key_position = key_position.transpose(0, 1)
                     value_binary = value_binary.transpose(0, 1)
@@ -356,6 +366,8 @@ class FastDETR(nn.Module):
             query, used_pos_embed, tgt_mask=None, src_query=query_features, 
             cls_func=get_query_and_mask, key_content=key_content, key_position=key_position, value_binary=value_binary)
         if classes_temp is not None and classes_ is None:# None [2, 1000]
+            classes_ = classes_temp
+        if self.args.rpn_t2v:
             classes_ = classes_temp
         if confidences_ is not None and confidences is None:
             confidences = confidences_
