@@ -194,16 +194,20 @@ class Transformer(nn.Module):
             valid_ratio = None
             shape = None
 
+        memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, shape=shape, valid_ratio=valid_ratio,
+                                key_content=key_content, key_position=key_position, value_binary=value_binary)# ->[4150, 2, 256]
         if self.args.t2v_encoder:
             image_length = src.shape[0]# [4150, 2, 256] -> 4150
             src = torch.cat((src, key_content))# [4150, 2, 256] [240, 2, 256] -> [4390, 2, 256]
-            src = self.t2v_encoder(src, src_key_padding_mask=mask, pos=pos_embed, key_position=key_position, 
+            src = self.t2v_encoder(src, src_key_padding_mask=mask, pos=pos_embed, key_content=key_content, key_position=key_position, 
                 image_length=image_length, value_binary=value_binary)  # (L, batch_size, d)
             src = src[:image_length]
             memory = src
             mask = mask[:, :image_length]
-        memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, shape=shape, valid_ratio=valid_ratio,
-                                key_content=key_content, key_position=key_position, value_binary=value_binary)# ->[4150, 2, 256]
+        
+        if self.args.rpn_t2v:
+            refpoint_embed = None
+            src_query = None
 
         if refpoint_embed is not None:# [1000, 2, 4] train
             if refpoint_embed.dim() == 2:
@@ -213,7 +217,7 @@ class Transformer(nn.Module):
             classes = None
             out_dict = None
             confidences = None
-            if self.args.t2v_rpn:
+            if self.args.rpn_t2v or self.args.rpn_loss:# 之前写错了
                 # firstly forward the rpn
                 proposals, logits = self.gen_encoder_output_proposals(memory, mask, size=(h, w))
                 # create a dict
@@ -230,7 +234,7 @@ class Transformer(nn.Module):
             selected_inds = logits.topk(k=self.stage1_box, dim=0)[1][:,:,0]
             refpoint_embed = torch.gather(proposals, dim=0, index=selected_inds.unsqueeze(-1).expand(self.stage1_box, bs, 4))
             classes, src_query, refpoint_embed, confidences, key_content, key_position, value_binary = cls_func(refpoint_embed.detach())
-            
+            # src_query = None #单纯用fg value
 
         # in case of split_class
         if src.size(1) != refpoint_embed.size(1):# split class: [3700, 2, 256] [1000, 4, 4]
@@ -243,6 +247,9 @@ class Transformer(nn.Module):
         if self.num_patterns == 0:
             if src_query is not None:# train
                 tgt = src_query.permute(1,0,2)
+                if self.args.binary_token:
+                    tgt = value_binary[0].repeat(num_queries, 1, 1)
+                    tgt = tgt + src_query.permute(1,0,2)
             else:
                 if self.args.binary_token:
                     tgt = value_binary[0].repeat(num_queries, 1, 1)# TODO:用detach吗？
@@ -317,6 +324,9 @@ class TransformerEncoder(nn.Module):
         self.norm = norm
         self.mix_encoder = mix_encoder
         self.t2v_encoder = t2v_encoder
+        if self.t2v_encoder:
+            self.ref_anchor_head = MLP(d_model, d_model, 2, 2)
+            self.d_model = d_model
         if self.mix_encoder:
             dim_feedforward = 1024
             dropout = 0.1
@@ -357,8 +367,13 @@ class TransformerEncoder(nn.Module):
             key_points = key_position.sigmoid()# [200, 2, 4]
             obj_center = key_points[..., :4]     # [200, 2, 4] self.query_dim=4
             # get sine embedding for the query vector
-            key_sine_embed = gen_sineembed_for_position(obj_center)  # [200, 2, 4]->[200, 2, 512]
+            key_sine_embed = gen_sineembed_for_position(obj_center)  # [200, 2, 4]->[200, 2, 512] xywh
             key_sine_embed = key_sine_embed[...,:256]
+            # add modulated HW attentions
+            refHW_cond = self.ref_anchor_head(key_content).sigmoid() # 256->2 [200, 2, 256]->nq, bs, 2 [200, 2, 2] // split class [1000, 4, 256]->[1000, 4, 2]
+            key_sine_embed[..., self.d_model // 2:] *= (refHW_cond[..., 0] / obj_center[..., 2]).unsqueeze(-1)# [200, 2, 128]*[200, 2, 1]
+            # refHW_cond: [1000, 2, 2]; obj_center: [1000, 2, 4]
+            key_sine_embed[..., :self.d_model // 2] *= (refHW_cond[..., 1] / obj_center[..., 3]).unsqueeze(-1)# [200, 2, 128]
             # import ipdb;ipdb.set_trace()
             pos = torch.cat((pos, key_sine_embed))
         for layer_id, layer in enumerate(self.layers):
