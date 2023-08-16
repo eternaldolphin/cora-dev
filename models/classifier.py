@@ -41,6 +41,7 @@ class Classifier(torch.nn.Module):
         
         if "clip" in name:
             name = name.replace('clip_', '')
+            name = name.replace('CS_', '')
             if name in _MODELS:
                 model_path = _download(_MODELS[name], os.path.expanduser("~/.cache/clip"))
             elif os.path.isfile(name):

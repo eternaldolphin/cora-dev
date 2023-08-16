@@ -511,9 +511,9 @@ class FastDETR(nn.Module):
             rpn_boxes[i][:,[0,2]] = rpn_boxes[i][:,[0,2]] * sizes[i][0]# w乘上自己对应的size
             rpn_boxes[i][:,[1,3]] = rpn_boxes[i][:,[1,3]] * sizes[i][1]
 
-        if self.args.backbone == 'clip_RN50x4':
+        if self.args.backbone in ['clip_RN50x4', 'CS_clip_RN50x4']:
             reso = 18
-        elif self.args.backbone == 'clip_RN50':
+        elif self.args.backbone in ['clip_RN50', 'CS_clip_RN50']:
             reso = 14
         if self.args.no_efficient_pooling or extra_conv:# False False
             roi_features = torchvision.ops.roi_align(

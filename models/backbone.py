@@ -18,7 +18,7 @@ from util.misc import NestedTensor, is_main_process
 from .position_encoding import build_position_encoding
 from models.clip.clip import _MODELS, _download, available_models
 from models.clip.model import ModifiedResNet
-
+from models.clip.clip_surgery_model import CSModifiedResNet
 
 class FrozenBatchNorm2d(torch.nn.Module):
     """
@@ -123,6 +123,10 @@ class Backbone(BackboneBase):
         region_prompt_path = args.region_prompt_path
 
         if "clip" in name and not no_clip_init:
+            clip_surgery = False
+            if "CS" in name:
+                clip_surgery = True
+                name = name.replace('CS_', '')
             name = name.replace('clip_', '')
             if model_path:
                 pass
@@ -153,10 +157,13 @@ class Backbone(BackboneBase):
                 output_dim, embed_dim = state_dict['visual.attnpool.c_proj.weight'].shape
                 vision_heads = vision_width * 32 // 64
                 image_resolution = round((state_dict["visual.attnpool.positional_embedding"].shape[0] - 1) ** 0.5) * 32
-            
             if name in ['RN50', 'RN50x4']:
-                backbone = ModifiedResNet(layers=vision_layers, output_dim=output_dim, heads=vision_heads, input_resolution=image_resolution, 
-                                          width=vision_width, bn=FrozenBatchNorm2d, args=args)
+                if clip_surgery:
+                    backbone = CSModifiedResNet(layers=vision_layers, output_dim=output_dim, heads=vision_heads, input_resolution=image_resolution, 
+                                            width=vision_width)
+                else:
+                    backbone = ModifiedResNet(layers=vision_layers, output_dim=output_dim, heads=vision_heads, input_resolution=image_resolution, 
+                                            width=vision_width, bn=FrozenBatchNorm2d, args=args)
                 new_state_dict = dict()
                 num_channels = embed_dim
                 new_state_dict.update({k.replace('visual.', ''): v for k, v in state_dict.items() if k.startswith('visual.')})
