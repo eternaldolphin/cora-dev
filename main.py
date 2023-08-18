@@ -168,8 +168,8 @@ def get_args_parser():
     parser.add_argument('--binary_token', action='store_true')
     parser.add_argument('--t2v_encoder', action='store_true')
     parser.add_argument('--mix_encoder', action='store_true')# 与t2v不同时出现
-    parser.add_argument('--num_cls_keys', default=120, type=int)
-    parser.add_argument('--num_neg_keys', default=10, type=int)
+    parser.add_argument('--num_cls_keys', default=300, type=int)
+    parser.add_argument('--num_neg_keys', default=50, type=int)
     parser.add_argument('--bg_class_key', action='store_true')
     parser.add_argument('--rpn_t2v', action='store_true')
     parser.add_argument('--rpn_loss', action='store_true')

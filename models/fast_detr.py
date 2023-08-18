@@ -208,7 +208,7 @@ class FastDETR(nn.Module):
         else:
             query = None
 
-        def get_query_and_mask(query, split_class=split_class):
+        def get_query_and_mask(query, splcls=split_class):
             query_features = None
             sa_mask = None
             classes_ = None
@@ -232,7 +232,7 @@ class FastDETR(nn.Module):
                     # classify the proposals
                     text_feature = self.classifier(categories)# ->[65, 1024]
                 
-                if split_class:# 有一定概率是true/false
+                if splcls:# 有一定概率是true/false
                     # split class
                     split_mask = torch.rand_like(text_feature[:,0]) > 0.5# [65] [False,  True,  True, False, F..
                     text_feature1 = text_feature.clone()# [65, 1024]
@@ -366,9 +366,10 @@ class FastDETR(nn.Module):
                     key_neg_cont = []
                     key_pos_posi = []
                     for b in range(query.shape[1]):
-                        key_pos_cont.append(projected_text[used_classes_[b]])# [100, 1024]# 去掉nms
-                        key_pos_posi.append(query[:, b, :])# [100, 4]
-                        k_pos_class = classes_[b]# 150
+                        keep = nms(query[:, b, :], scores_[b], 0.9)[:self.num_cls_keys]# [1000, 4] [1000]->[100]
+                        key_pos_cont.append(projected_text[used_classes_[b][keep]])# [100, 1024]
+                        key_pos_posi.append(query[:, b, :][keep])# [100, 4]
+                        k_pos_class = classes_[b][keep]# 150
                         k_neg_class = [c for c in range(projected_text.size(0)) if c not in k_pos_class]
 
                         k_neg_classes = random.sample(k_neg_class, min(self.num_neg_keys, len(k_neg_class)))
@@ -389,8 +390,10 @@ class FastDETR(nn.Module):
             return classes_, query_features, query, confidences, key_content, key_position, value_prompt# [2, 1000] [2, 1000, 256] [1000, 2, 4] None// split class [4, 1000] [4, 1000, 256] [1000, 4, 4] None
             # split class [4, 1000] None [1000, 4, 4] None
         if not self.args.rpn:
-            # import ipdb;ipdb.set_trace()
-            classes_, query_features, query, confidences, key_content, key_position, value_prompt = get_query_and_mask(query)# [1000, 2, 4]->[2, 1000] [2, 1000, 256] [1000, 2, 4] None
+            if self.args.text_prompt:
+                classes_, query_features, query, confidences, key_content, key_position, value_prompt = get_query_and_mask(query, splcls=False)# [1000, 2, 4]->[2, 1000] [2, 1000, 256] [1000, 2, 4] None
+            else:
+                classes_, query_features, query, confidences, key_content, key_position, value_prompt = get_query_and_mask(query)# [1000, 2, 4]->[2, 1000] [2, 1000, 256] [1000, 2, 4] None
         else:
             query_features = None
             classes_ = None
@@ -405,7 +408,7 @@ class FastDETR(nn.Module):
             cls_func=get_query_and_mask, key_content=key_content, key_position=key_position, value_prompt=value_prompt)
         if classes_temp is not None and classes_ is None:# None [2, 1000]
             classes_ = classes_temp
-        if self.args.rpn_t2v:
+        if self.args.rpn_t2v or self.args.text_prompt:#做两次 roi align
             classes_ = classes_temp
         if confidences_ is not None and confidences is None:
             confidences = confidences_
@@ -667,7 +670,7 @@ class SetCriterion(nn.Module):
         target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
 
         target_classes_onehot = target_classes_onehot[:,:,:-1]
-        
+
         loss_ce = sigmoid_focal_loss(src_logits, target_classes_onehot, num_boxes, alpha=self.focal_alpha, gamma=2, reduce=False)
         weight_mask = torch.ones_like(loss_ce)
         for i, ig in enumerate(outputs['ignore']):
