@@ -90,14 +90,13 @@ class HungarianMatcher(nn.Module):
             # val: [2, 1000, 65] [2, 1000, 4]
             # filter by threshold
             score = score[:,0] # [1000, 1]->[1000]
-            mask = score.sigmoid() > self.score_threshold# 2.0  [1000]
-            ignore_idx = mask.nonzero()[:,0]
-            score = score[mask]# [0]
-            box = box[mask]# [0]
-            keep = batched_nms(box_cxcywh_to_xyxy(box), score, torch.zeros_like(score), 0.5)
-            ignore.append(ignore_idx[keep])
-            
-        # import ipdb;ipdb.set_trace()
+            mask = score.sigmoid() > self.score_threshold# 2.0  [1000] mask.sum()=0
+            ignore_idx = mask.nonzero()[:,0]# tensor([], device='cuda:0', size=(0, 1), dtype=torch.int64)->tensor([], device='cuda:0', dtype=torch.int64)
+            score = score[mask]# tensor([], device='cuda:0')
+            box = box[mask]# tensor([], device='cuda:0')
+            keep = batched_nms(box_cxcywh_to_xyxy(box), score, torch.zeros_like(score), 0.5)# tensor([], device='cuda:0')
+            ignore.append(ignore_idx[keep])# tensor([], device='cuda:0')
+
         if 'proposal_classes' in outputs:# val ['pred_logits', 'pred_boxes', 'proposal', 'proposal_classes', 'use_nms']
             ori_tgt_ids = torch.cat([v["ori_labels"] for v in targets])# tensor([50, 50, 46, 46, 46, 46,  0,  0, 55, 59, 60, 60, 61, 62, 62, 46, 62, 62, 17], device='cuda:0')
             batch_idx = torch.cat([torch.zeros_like(v["ori_labels"]) + i for i, v in enumerate(targets)])# tensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], device='cuda:0')
@@ -124,7 +123,7 @@ class HungarianMatcher(nn.Module):
 
                 giou = -cost_giou.view(bs, num_queries, -1)# [2000, 19]->[2, 1000, 19]
                 # only consider the correctly classified subset 只优化proposal的class在target label里的proposal
-                giou[~valid_mask] = -1
+                giou[~valid_mask] = -1 # 如果类别没预测对 giou为-1
                 # any one of the correctly classified subset has giou > 0 is a valid box
                 valid_box = (giou > 0).any(1)# [2, 19]保留和1000个proposal iou>0的target bbox [2, 14]
                 # remove the invalid box
@@ -153,7 +152,7 @@ class HungarianMatcher(nn.Module):
                     C = C + semantic_cost
 
         C = C.cpu()# [2, 1000, 19]
-
+        outputs['valid_mask'] = valid_mask
         indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
 
         C = [c[i] for i, c in enumerate(C.split(sizes, -1))]

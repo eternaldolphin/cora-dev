@@ -208,7 +208,7 @@ class FastDETR(nn.Module):
         else:
             query = None
 
-        def get_query_and_mask(query):
+        def get_query_and_mask(query, split_class=split_class):
             query_features = None
             sa_mask = None
             classes_ = None
@@ -632,7 +632,7 @@ class SetCriterion(nn.Module):
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
         2) we supervise each pair of matched ground-truth / prediction (supervise class and box)
     """
-    def __init__(self, num_classes, matcher, weight_dict, focal_alpha, losses, rpn_cls_cost):
+    def __init__(self, num_classes, matcher, weight_dict, focal_alpha, losses, rpn_cls_cost, args):
         """ Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -648,6 +648,7 @@ class SetCriterion(nn.Module):
         self.losses = losses
         self.focal_alpha = focal_alpha
         self.rpn_cls_cost = rpn_cls_cost
+        self.args = args
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (Binary focal loss)
@@ -862,20 +863,20 @@ class PostProcess(nn.Module):
             labels = []
             boxes = []
             out_logits = out_logits.sigmoid()
-            for class_logit, coords in zip(out_logits, boxes__):
-                valid_mask = torch.isfinite(coords).all(dim=1) & torch.isfinite(class_logit).all(dim=1)
+            for class_logit, coords in zip(out_logits, boxes__):# [4, 1000, 65] [4, 1000, 4]
+                valid_mask = torch.isfinite(coords).all(dim=1) & torch.isfinite(class_logit).all(dim=1)# 去掉finite
                 if not valid_mask.all():
                     coords = coords[valid_mask]
                     class_logit = class_logit[valid_mask]
 
                 coords = coords.unsqueeze(1)
-                filter_mask = class_logit > score_threshold
-                filter_inds = filter_mask.nonzero()
-                coords = coords[filter_inds[:, 0], 0]
-                scores_ = class_logit[filter_mask]
-                keep = batched_nms(coords, scores_, filter_inds[:, 1], nms_thres)
-                keep = keep[:self.max_det]
-                coords, scores_, filter_inds = coords[keep], scores_[keep], filter_inds[keep]
+                filter_mask = class_logit > score_threshold # [1000, 65]
+                filter_inds = filter_mask.nonzero()# [25564, 2] 1:proposal 2:class
+                coords = coords[filter_inds[:, 0], 0]# [1000, 1, 4] -> [25564, 4]
+                scores_ = class_logit[filter_mask]# [25564]
+                keep = batched_nms(coords, scores_, filter_inds[:, 1], nms_thres)#[25564, 4] [25564] [25564] 0.5
+                keep = keep[:self.max_det]# [100]
+                coords, scores_, filter_inds = coords[keep], scores_[keep], filter_inds[keep]# [100, 4] [100] [100, 2]
                 scores.append(scores_)
                 labels.append(filter_inds[:, 1])
                 boxes.append(coords)
@@ -950,7 +951,8 @@ def build(args):
                             weight_dict=weight_dict,
                             focal_alpha=args.focal_alpha,
                             losses=losses,
-                            rpn_cls_cost=args.set_cost_class_rpn)
+                            rpn_cls_cost=args.set_cost_class_rpn,
+                            args=args)
     criterion.to(device)
     post_processors = {'bbox': PostProcess(args)}
     if args.masks:

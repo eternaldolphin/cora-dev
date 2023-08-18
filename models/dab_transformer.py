@@ -194,6 +194,14 @@ class Transformer(nn.Module):
             valid_ratio = None
             shape = None
 
+        
+        # in case of split_class
+        if self.args.text_prompt:
+            if src.size(1) != refpoint_embed.size(1):# split class: [3700, 2, 256] [1000, 4, 4]
+                mask = mask.repeat(2, 1)# [2, 3700]->[4, 3700]
+                pos_embed = pos_embed.repeat(1, 2, 1)# [3700, 2, 256]->[3700, 4, 256]
+                src = src.repeat(1, 2, 1)# [3700, 2, 256]->[3700, 4, 256]
+
         if self.args.t2v_encoder:
             image_length = src.shape[0]# [4150, 2, 256] -> 4150
             src = torch.cat((src, key_content))# [4150, 2, 256] [240, 2, 256] -> [4390, 2, 256]
@@ -205,7 +213,7 @@ class Transformer(nn.Module):
         memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed, shape=shape, valid_ratio=valid_ratio,
                                 key_content=key_content, key_position=key_position, value_prompt=value_prompt)# ->[4150, 2, 256]
         if self.args.text_prompt:
-            classes, src_query, refpoint_embed, confidences, key_content, key_position, value_prompt = cls_func(refpoint_embed.detach())
+            classes, src_query, refpoint_embed, confidences, key_content, key_position, value_prompt = cls_func(refpoint_embed.detach(), split_class=False)
         if self.args.rpn_t2v:
             refpoint_embed = None
             src_query = None
@@ -237,10 +245,11 @@ class Transformer(nn.Module):
             
 
         # in case of split_class
-        if src.size(1) != refpoint_embed.size(1):# split class: [3700, 2, 256] [1000, 4, 4]
-            mask = mask.repeat(2, 1)# [2, 3700]->[4, 3700]
-            pos_embed = pos_embed.repeat(1, 2, 1)# [3700, 2, 256]->[3700, 4, 256]
-            memory = memory.repeat(1, 2, 1)# [3700, 2, 256]->[3700, 4, 256]
+        if not self.args.text_prompt:
+            if src.size(1) != refpoint_embed.size(1):# split class: [3700, 2, 256] [1000, 4, 4]
+                mask = mask.repeat(2, 1)# [2, 3700]->[4, 3700]
+                pos_embed = pos_embed.repeat(1, 2, 1)# [3700, 2, 256]->[3700, 4, 256]
+                memory = memory.repeat(1, 2, 1)# [3700, 2, 256]->[3700, 4, 256]
 
         # query_embed = gen_sineembed_for_position(refpoint_embed)
         num_queries = refpoint_embed.shape[0]# 1000
