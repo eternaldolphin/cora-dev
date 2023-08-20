@@ -366,11 +366,25 @@ class FastDETR(nn.Module):
                     key_neg_cont = []
                     key_pos_posi = []
                     for b in range(query.shape[1]):
-                        keep = nms(query[:, b, :], scores_[b], 0.9)[:self.num_cls_keys]# [1000, 4] [1000]->[100]
-                        key_pos_cont.append(projected_text[used_classes_[b][keep]])# [100, 1024]
-                        key_pos_posi.append(query[:, b, :][keep])# [100, 4]
-                        k_pos_class = classes_[b][keep]# 150
-                        k_neg_class = [c for c in range(projected_text.size(0)) if c not in k_pos_class]
+                        # 类别nms
+                        if self.args.prompt_batchnms:
+                            _query = query[:, b, :].unsqueeze(1)# [1000, 1, 4]
+                            _filter_mask = outputs_class[b] > 0 # [1000, 65]
+                            _filter_inds = _filter_mask.nonzero()# [65000, 2] 1:proposal 2:class
+                            _query = _query[_filter_inds[:, 0], 0]# [1000, 1, 4] -> [65000, 4]
+                            _scores = outputs_class[b][_filter_mask]# [65000]
+                            keep = batched_nms(_query, _scores, _filter_inds[:, 1], 0.5)#[65000, 4] [65000] [65000] 0.5 -> [61184]
+                            keep = keep[:self.num_cls_keys]# [300]
+                            key_pos_cont.append(projected_text[_filter_inds[:, 1][keep]])# [300, 256]
+                            key_pos_posi.append(_query[keep])# [100, 4]
+                            k_pos_class = _filter_inds[:, 1][keep]# 150
+                            k_neg_class = [c for c in range(projected_text.size(0)) if c not in k_pos_class]
+                        else:
+                            keep = nms(query[:, b, :], scores_[b], 0.9)[:self.num_cls_keys]# [1000, 4] [1000]->[100]
+                            key_pos_cont.append(projected_text[used_classes_[b][keep]])# [100, 1024]
+                            key_pos_posi.append(query[:, b, :][keep])# [100, 4]
+                            k_pos_class = classes_[b][keep]# 150
+                            k_neg_class = [c for c in range(projected_text.size(0)) if c not in k_pos_class]
 
                         k_neg_classes = random.sample(k_neg_class, min(self.num_neg_keys, len(k_neg_class)))
                         while len(k_neg_classes) < self.num_neg_keys: k_neg_classes.append(random.choice(k_neg_class))

@@ -174,6 +174,7 @@ def get_args_parser():
     parser.add_argument('--rpn_t2v', action='store_true')
     parser.add_argument('--rpn_loss', action='store_true')
     parser.add_argument('--text_prompt', action='store_true')
+    parser.add_argument('--prompt_batchnms', action='store_true')
 
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
