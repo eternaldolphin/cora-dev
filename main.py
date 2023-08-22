@@ -175,6 +175,7 @@ def get_args_parser():
     parser.add_argument('--rpn_loss', action='store_true')
     parser.add_argument('--text_prompt', action='store_true')
     parser.add_argument('--prompt_batchnms', action='store_true')
+    parser.add_argument('--eval_proposal', action='store_true')
 
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
@@ -376,7 +377,7 @@ def main(args):
                 args,
             )
         else:
-            test_stats, coco_evaluator = evaluate(
+            test_stats, coco_evaluator, coco_evaluator_all = evaluate(
                 model_ema.ema if args.model_ema else model, criterion, post_processors, data_loader_val, base_ds, device, args.output_dir, args=args
             )
             if args.output_dir:

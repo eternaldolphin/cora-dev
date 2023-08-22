@@ -297,9 +297,6 @@ class FastDETR(nn.Module):
                         scores_ = outputs_class.max(-1)[0]# [2, 1000]
                     else:
                         classes_ = outputs_class.topk(dim=-1, k=self.args.topk_matching)[1]
-                    classes_, indices = classes_.sort(-1)# [2, 1000] [2, 1000] // split class: [4, 1000] [4, 1000]
-                    indices = indices.permute(1,0).unsqueeze(-1).expand(indices.size(1), indices.size(0), 4)# [1000, 2, 4]// split class: [1000, 4, 4]
-                query = torch.gather(query, 0, indices)# -> [1000, 2, 4] // split class: [1000, 4, 4]
                 sa_mask = None
                 if self.args.condition_on_text:
                     projected_text = self.text_proj(text_feature)# [65, 1024]->[65, 256]映射text feature维度/train: [48, 1024]->[48, 256]
@@ -401,6 +398,7 @@ class FastDETR(nn.Module):
                     key_content = key_content.transpose(0, 1)
                     key_position = key_position.transpose(0, 1)
                     value_prompt = key_content# 2. value换成text embedding
+                confidences = outputs_class
             return classes_, query_features, query, confidences, key_content, key_position, value_prompt# [2, 1000] [2, 1000, 256] [1000, 2, 4] None// split class [4, 1000] [4, 1000, 256] [1000, 4, 4] None
             # split class [4, 1000] None [1000, 4, 4] None
         if not self.args.rpn:
@@ -518,6 +516,9 @@ class FastDETR(nn.Module):
             out['pred_logits'] = outputs_class# [2, 1000, 65]
         if self.args.use_nms and not self.args.no_nms:
             out['use_nms'] = 0
+        
+        if self.args.eval_proposal:
+            out['enc_outputs'] = {'pred_logits': confidences, 'pred_boxes': out['proposal'].permute(1, 0, 2)}# TODO: sigmoid or not
 
         return out
 
@@ -857,6 +858,7 @@ class PostProcess(nn.Module):
             self.max_det = 300
         else:
             self.max_det = 100
+        self.args = args
 
     @torch.no_grad()
     def forward(self, outputs, target_sizes):
@@ -912,6 +914,48 @@ class PostProcess(nn.Module):
         boxes = [box * fct[None] for box, fct in zip(boxes, scale_fct)]
 
         results = [{'scores': s, 'labels': l, 'boxes': b} for s, l, b in zip(scores, labels, boxes)]
+        if self.args.eval_proposal:
+            out_logits_rpn, out_bbox_rpn = outputs['enc_outputs']['pred_logits'], outputs['enc_outputs']['pred_boxes']
+            # nms
+            '''
+            score_threshold = 0.001
+            nms_thres = 0.5
+            boxes__rpn = box_ops.box_cxcywh_to_xyxy(out_bbox_rpn)
+            scores_rpn = []
+            labels_rpn = []
+            boxes_rpn = []
+            out_logits_rpn = out_logits_rpn.sigmoid()
+            for class_logit_rpn, coords_rpn in zip(out_logits_rpn, boxes__rpn):# [4, 1000, 65] [4, 1000, 4]
+                valid_mask_rpn = torch.isfinite(coords_rpn).all(dim=1) & torch.isfinite(class_logit_rpn).all(dim=1)# 去掉finite
+                if not valid_mask_rpn.all():
+                    coords_rpn = coords_rpn[valid_mask_rpn]
+                    class_logit_rpn = class_logit_rpn[valid_mask_rpn]
+
+                coords_rpn = coords_rpn.unsqueeze(1)
+                filter_mask_rpn = class_logit_rpn > score_threshold # [1000, 65]
+                filter_inds_rpn = filter_mask_rpn.nonzero()# [25564, 2] 1:proposal 2:class
+                coords_rpn = coords_rpn[filter_inds_rpn[:, 0], 0]# [1000, 1, 4] -> [25564, 4]
+                scores__rpn = class_logit_rpn[filter_mask_rpn]# [25564]
+                keep_rpn = batched_nms(coords_rpn, scores__rpn, filter_inds_rpn[:, 1], nms_thres)#[25564, 4] [25564] [25564] 0.5
+                keep_rpn = keep_rpn[:self.max_det]# [100]
+                coords_rpn, scores__rpn, filter_inds_rpn = coords_rpn[keep_rpn], scores__rpn[keep_rpn], filter_inds_rpn[keep_rpn]# [100, 4] [100] [100, 2]
+                scores_rpn.append(scores__rpn)
+                labels_rpn.append(filter_inds_rpn[:, 1])
+                boxes_rpn.append(coords_rpn)
+            '''
+            prob_rpn = out_logits_rpn.sigmoid()
+            topk_values_rpn, topk_indexes_rpn = torch.topk(prob_rpn.view(out_logits_rpn.shape[0], -1), 100, dim=1)
+            scores_rpn = topk_values_rpn
+            topk_boxes_rpn = topk_indexes_rpn // out_logits_rpn.shape[2]
+            labels_rpn = topk_indexes_rpn % out_logits_rpn.shape[2]
+            boxes_rpn = box_ops.box_cxcywh_to_xyxy(out_bbox_rpn)
+            boxes_rpn = torch.gather(boxes_rpn, 1, topk_boxes_rpn.unsqueeze(-1).repeat(1, 1, 4))
+
+            boxes_rpn = [box_rpn * fct[None] for box_rpn, fct in zip(boxes_rpn, scale_fct)]
+            results_rpn = [{'scores': s, 'labels': l, 'boxes': b} for s, l, b in zip(scores_rpn, labels_rpn, boxes_rpn)]
+            results = [results]
+            results.append(results_rpn)
+            # import ipdb;ipdb.set_trace()
         return results
 
 

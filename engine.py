@@ -196,6 +196,10 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
     else:
         iou_types = tuple(k for k in ('segm', 'bbox') if k in postprocessors.keys())
         coco_evaluator = CocoEvaluator(base_ds, iou_types, label2cat=data_loader.dataset.label2catid, args=args)
+        if args.eval_proposal:
+            coco_evaluator_all = CocoEvaluator(base_ds, iou_types, label2cat=data_loader.dataset.label2catid, args=args)
+        else:
+            coco_evaluator_all = None
 
         panoptic_evaluator = None
         if 'panoptic' in postprocessors.keys():
@@ -240,7 +244,12 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             metric_logger.update(class_error=loss_dict_reduced['class_error'])
 
             orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
-            results = postprocessors['bbox'](outputs, orig_target_sizes)
+            if args.eval_proposal:
+                results_all = postprocessors['bbox'](outputs, orig_target_sizes)
+                results = results_all[0]
+                results_rpn = results_all[1]
+            else:
+                results = postprocessors['bbox'](outputs, orig_target_sizes)
         else:
             # to make metric logger happy
             metric_logger.update(loss=0, class_error=0)
@@ -292,6 +301,10 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             res = {target['image_id'].item(): output for target, output in zip(targets, results)}
             if coco_evaluator is not None:
                 coco_evaluator.update(res)
+            if args.eval_proposal:
+                res_rpn = {target['image_id'].item(): output for target, output in zip(targets, results_rpn)}
+                if coco_evaluator_all is not None:
+                    coco_evaluator_all.update(res_rpn)
 
         if args.visualize:
             visualizer = COCOVisualizer()
@@ -372,11 +385,17 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             coco_evaluator.synchronize_between_processes()
         if panoptic_evaluator is not None:
             panoptic_evaluator.synchronize_between_processes()
+        if coco_evaluator_all is not None:
+            coco_evaluator_all.synchronize_between_processes()
 
         # accumulate predictions from all images
         if coco_evaluator is not None:
             coco_evaluator.accumulate()
             coco_evaluator.summarize()
+        if coco_evaluator_all is not None:
+            coco_evaluator_all.accumulate()
+            coco_evaluator_all.summarize()
+
         panoptic_res = None
         if panoptic_evaluator is not None:
             panoptic_res = panoptic_evaluator.summarize()
@@ -400,8 +419,10 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         del weight_dict
 
         torch.cuda.empty_cache()
-
-        return stats, coco_evaluator
+        if args.eval_proposal:
+            return stats, coco_evaluator, coco_evaluator_all
+        else:
+            return stats, coco_evaluator
 
 
 @torch.no_grad()
