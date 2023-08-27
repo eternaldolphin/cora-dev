@@ -422,7 +422,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         if args.eval_proposal:
             return stats, coco_evaluator, coco_evaluator_all
         else:
-            return stats, coco_evaluator
+            return stats, coco_evaluator, None
 
 
 @torch.no_grad()

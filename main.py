@@ -176,6 +176,7 @@ def get_args_parser():
     parser.add_argument('--text_prompt', action='store_true')
     parser.add_argument('--prompt_batchnms', action='store_true')
     parser.add_argument('--eval_proposal', action='store_true')
+    parser.add_argument('--eval_ml', action='store_true')
 
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')

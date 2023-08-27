@@ -413,7 +413,17 @@ class FastDETR(nn.Module):
             key_content = None 
             key_position = None 
             value_prompt = None
-
+        if self.args.eval_ml:
+            pred_fgs = [torch.unique(c).cpu().tolist() for c in classes_]
+            class_gts = [t['labels'].cpu().tolist() for t in targets]
+            for pred_fg, class_gt in zip(pred_fgs, class_gts):
+                true_positive = len([p for p in pred_fg if p in class_gt])
+                false_positive = len([p for p in pred_fg if p not in class_gt])
+                false_negative = len([p for p in class_gt if p not in pred_fg])
+                recall = true_positive/(true_positive + false_negative)
+                precision = true_positive/(true_positive + false_positive)
+                print('recall: ', recall, ', precision: ', precision)
+            
         used_pos_embed = [pos_embeds[self.args.backbone_feature]]
         hs, reference, memory, classes_temp, out_dict, confidences_ = self.transformer(srcs, masks, 
             query, used_pos_embed, tgt_mask=None, src_query=query_features, 
@@ -514,6 +524,13 @@ class FastDETR(nn.Module):
             outputs_class = outputs_class[:,:,:-1]# [2, 1000, 65]
             outputs_class = inverse_sigmoid(outputs_class)# [2, 1000, 65]
             out['pred_logits'] = outputs_class# [2, 1000, 65]
+        
+        if self.args.eval_ml:
+            before_class = classes_.cpu()
+            after_class = outputs_class.max(-1)[1].cpu()
+            align = (before_class == after_class).float().mean()
+            print('decoder align: ', align.data)
+
         if self.args.use_nms and not self.args.no_nms:
             out['use_nms'] = 0
         
