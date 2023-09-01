@@ -144,3 +144,5 @@ detectron2
 COCO_RN50.pth
 configs/COCO
 COCO_RN50_fewshot.pth
+category_analysis
+instructor_ovcoco.pth

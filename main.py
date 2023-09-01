@@ -442,7 +442,7 @@ def main(args):
                                 'model_ema': get_state_dict(model_ema) if model_ema else -1,
                             }, best_path)
             else:
-                test_stats, coco_evaluator = evaluate(
+                test_stats, coco_evaluator, _ = evaluate(
                     model if model_ema is None else model_ema.ema, criterion, post_processors, data_loader_val, base_ds, device, args.output_dir, args=args
                 )
                 targetAP50 = test_stats['coco_eval_bbox'][-3]

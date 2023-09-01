@@ -304,7 +304,8 @@ def evaluate(self):
     p.imgIds = list(np.unique(p.imgIds))
     if p.useCats:
         p.catIds = list(np.unique(p.catIds))
-    p.maxDets = sorted(p.maxDets)
+    # p.maxDets = sorted(p.maxDets)
+    p.maxDets = [100, 1000, 300]
     self.params = p
 
     self._prepare()
