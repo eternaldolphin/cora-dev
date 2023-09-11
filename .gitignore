@@ -139,3 +139,12 @@ data/
 data
 cora_server_backup
 cora_server_backup/*
+
+logs/*
+category_analysis/*
+configs/*
+detectron2
+COCO_RN50.pth
+configs
+COCO_RN50_fewshot.pth
+instructor_ovcoco.pth

@@ -119,10 +119,8 @@ def train_one_epoch(model: torch.nn.Module,
             for target in targets:
                 target['ori_labels'] = target['labels']
                 target['labels'] = target['labels'] - target['labels']
-            
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
-        
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
 
         # reduce losses over all GPUs for logging purposes
@@ -165,7 +163,7 @@ def train_one_epoch(model: torch.nn.Module,
         
         _cnt += 1
         if args.debug:
-            if _cnt % (15 * 4) == 0:
+            if _cnt % (15) == 0:
                 print("BREAK!"*5)
                 break
 
@@ -337,7 +335,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             
         _cnt += 1
         if args.debug:
-            if _cnt % (15 * 5) == 0:
+            if _cnt % (15) == 0:
                 print("BREAK!"*5)
                 break
 
