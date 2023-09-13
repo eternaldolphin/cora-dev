@@ -118,7 +118,6 @@ class FastDETR(nn.Module):
 
         # self.class_embed = nn.Linear(self.hidden_dim, num_classes)
         self.bbox_embed = MLP(self.hidden_dim, self.hidden_dim, 4, 3)
-        self.iou_embed = nn.Linear(self.hidden_dim, 1)
 
         # init prior_prob setting for focal loss
         prior_prob = 0.01
@@ -126,7 +125,9 @@ class FastDETR(nn.Module):
         self.objectness_embed = nn.Linear(self.hidden_dim, 1)
         if not self.args.disable_init:
             nn.init.constant_(self.objectness_embed.bias, bias_value)
-        self.iou_embed.bias.data = torch.ones(1) * bias_value
+        if self.args.iou:
+            self.iou_embed = nn.Linear(self.hidden_dim, 1)
+            self.iou_embed.bias.data = torch.ones(1) * bias_value
 
         if self.args.rpn:
             self.stage1_box_embed = MLP(self.hidden_dim, self.hidden_dim, 4, 3)
@@ -154,6 +155,14 @@ class FastDETR(nn.Module):
 
         if self.args.test_attnpool_path:
             self.test_attnpool = [torch.load(self.args.test_attnpool_path)]
+
+        category = ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard', 'kite', 'skateboard', 'surfboard', 'bottle', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot', 'pizza', 'donut', 'cake', 'chair', 'couch', 'bed', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'toothbrush']
+        self.text_feature = self.classifier(category)# [65, 1024]
+        # if self.args.ce_cls:
+        #     base_index = [0, 1, 2, 3, 6, 7, 8, 9, 10, 13, 14, 17, 18, 19, 20, 22, 24, 25, 26, 28, 30, 31, 33, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 46, 48, 49, 50, 51, 52, 53, 55, 56, 57, 59, 60, 61, 62, 64]
+        #     self.class_embed = nn.Linear(self.hidden_dim, 48)
+        #     self.class_embed.weight = nn.Parameter(self.text_feature[base_index])
+        #     self.class_embed.weight.requires_grad = False
 
     def forward(self, samples: NestedTensor, categories, gt_classes=None, targets=None, split_class=False):
         """The forward expects a NestedTensor, which consists of:
@@ -210,7 +219,7 @@ class FastDETR(nn.Module):
                 with torch.no_grad():
                     roi_features = self._sample_feature(sizes, query.sigmoid().permute(1,0,2), src_feature.tensors, extra_conv=False, box_emb=box_emb)
                     # classify the proposals
-                    text_feature = self.classifier(categories)
+                    text_feature = self.text_feature.to(roi_features.device)
                 
                 if split_class:
                     # split class
@@ -327,7 +336,12 @@ class FastDETR(nn.Module):
             outputs_coords.append(outputs_coord)
         outputs_coords = torch.stack(outputs_coords)
         objectness_score = self.objectness_embed(hs)
-        outputs_iou = self.iou_embed(hs)
+        if self.args.iou:
+            outputs_iou = self.iou_embed(hs)
+        if self.args.ce_cls:
+            base_index = [0, 1, 2, 3, 6, 7, 8, 9, 10, 13, 14, 17, 18, 19, 20, 22, 24, 25, 26, 28, 30, 31, 33, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 46, 48, 49, 50, 51, 52, 53, 55, 56, 57, 59, 60, 61, 62, 64]
+            proj_text_feature_base = self.text_proj(self.text_feature.to(hs.device))[base_index]# [48, 256]
+            outputs_cecls = hs @ proj_text_feature_base.t()# [6, 2, 1000, 48]
 
         roi_feats = []
         if not self.training:
@@ -351,8 +365,11 @@ class FastDETR(nn.Module):
             roi_features = roi_feats[-1]
             roi_feats = torch.stack(roi_feats)
 
-        out = {'pred_logits': objectness_score[-1], 'pred_boxes': outputs_coords[-1], 'pred_logits_iou':outputs_iou[-1]}
-
+        out = {'pred_logits': objectness_score[-1], 'pred_boxes': outputs_coords[-1]}
+        if self.args.iou:
+            out['pred_logits_iou'] = outputs_iou[-1]
+        if self.args.ce_cls:
+            out['pred_logits_class'] = outputs_cecls[-1]
         if query is not None:
             out['proposal'] = query.sigmoid()
 
@@ -366,7 +383,14 @@ class FastDETR(nn.Module):
             
                 
         if self.aux_loss:
-            out['aux_outputs'] = self._set_aux_loss(objectness_score, outputs_coords, outputs_iou)
+            out['aux_outputs'] = self._set_aux_loss(objectness_score, outputs_coords)
+            if self.args.ce_cls:
+                for i, aux in enumerate(out['aux_outputs']):
+                    aux['pred_logits_class'] = outputs_cecls[i]
+            if self.args.iou:
+                for i, aux in enumerate(out['aux_outputs']):
+                    aux['pred_logits_iou'] = outputs_iou[i]
+
 
 
         if self.args.remove_misclassified and self.args.anchor_pre_matching:
@@ -516,12 +540,12 @@ class FastDETR(nn.Module):
         return roi_features
 
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outputs_coords, outputs_iou):
+    def _set_aux_loss(self, outputs_class, outputs_coords):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
-        return [{'pred_logits': a, 'pred_boxes': b, 'pred_logits_iou':c}
-                for a, b, c in zip(outputs_class[:-1], outputs_coords[:-1], outputs_iou[:-1])]
+        return [{'pred_logits': a, 'pred_boxes': b}
+                for a, b in zip(outputs_class[:-1], outputs_coords[:-1])]
 
 
 class SetCriterion(nn.Module):
@@ -578,22 +602,22 @@ class SetCriterion(nn.Module):
             losses['class_error'] = 100 - accuracy(src_logits[idx], target_classes_o)[0]
         return losses
     
-    def loss_eda(self, outputs, targets, indices, num_boxes, log=True):
+    def loss_ce_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (Binary focal loss)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
         assert 'pred_logits' in outputs
-        src_logits = outputs['eda_logits']
+        src_logits = outputs['pred_logits_class']# [2, 1000, 48]
 
         idx = self._get_src_permutation_idx(indices)
-        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
-        target_classes = torch.full(src_logits.shape[:2], src_logits.size(-1), dtype=torch.int64, device=src_logits.device)
-        target_classes[idx] = target_classes_o# [4, 1000]
-        src_logits = src_logits[idx].sigmoid()# [3, 48]
-        target_classes = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)], dim=0)# [3]
-        loss_ce = F.cross_entropy(src_logits, target_classes) / num_boxes# [33, 1] [33]
+        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])# [14]
+        target_classes = torch.full(src_logits.shape[:2], src_logits.size(-1), dtype=torch.int64, device=src_logits.device)# [2, 1000]
+        target_classes[idx] = target_classes_o# [2, 1000]
+        src_logits = src_logits[idx].sigmoid()# [14, 48]
+        target_classes = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)], dim=0)# [14]
+        loss_ce = F.cross_entropy(src_logits, target_classes) / num_boxes# [14, 48] [14]
 
-        losses = {'loss_eda': loss_ce}
+        losses = {'loss_cecls': loss_ce}
         # if log:
         #     losses['class_error'] = 100 - accuracy(src_logits[idx], target_classes_o)[0]
         return losses
@@ -700,8 +724,12 @@ class SetCriterion(nn.Module):
             'cardinality': self.loss_cardinality,
             'boxes': self.loss_boxes,
             'masks': self.loss_masks,
-            'ious':self.loss_ious,
         }
+        if self.args.iou:
+            loss_map['ious'] = self.loss_ious
+        if self.args.ce_cls:
+            loss_map['ce_labels'] = self.loss_ce_labels
+
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
 
@@ -792,8 +820,9 @@ class PostProcess(nn.Module):
                           For evaluation, this must be the original image size (before any data augmentation)
                           For visualization, this should be the image size after data augment, but before padding
         """
-        out_logits, out_bbox, out_iou = outputs['pred_logits'], outputs['pred_boxes'], outputs['pred_logits_iou']
-
+        out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
+        if self.args.iou:
+            out_iou = outputs['pred_logits_iou']
         assert len(out_logits) == len(target_sizes)
         assert target_sizes.shape[1] == 2
 
@@ -805,6 +834,9 @@ class PostProcess(nn.Module):
             labels = []
             boxes = []
             out_logits = out_logits.sigmoid()
+            if self.args.iou:
+                iou = out_iou.sigmoid().repeat(1,1,out_logits.shape[-1])
+                out_logits = out_logits * iou # [2, 1000, 65]
             for class_logit, coords in zip(out_logits, boxes__):
                 valid_mask = torch.isfinite(coords).all(dim=1) & torch.isfinite(class_logit).all(dim=1)
                 if not valid_mask.all():
@@ -832,9 +864,6 @@ class PostProcess(nn.Module):
                 boxes.append(coords)
         else:
             prob = out_logits.sigmoid()
-            import ipdb;ipdb.set_trace()
-            iou = out_iou.sigmoid().repeat(1,1,prob.shape[-1])
-            prob = prob * iou
             topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), 100, dim=1)
             scores = topk_values
             topk_boxes = topk_indexes // out_logits.shape[2]
@@ -880,9 +909,14 @@ def build(args):
         'loss_ce': args.cls_loss_coef,
         'loss_bbox': args.bbox_loss_coef,
         'loss_giou': args.giou_loss_coef,
-        'loss_iou': args.giou_loss_coef,
     }
-    losses = ['labels', 'boxes', 'cardinality', 'ious']
+    losses = ['labels', 'boxes', 'cardinality']
+    if args.iou:
+        losses += ['ious']
+        weight_dict["loss_iou"] = args.giou_loss_coef
+    if args.ce_cls:
+        losses += ['ce_labels']
+        weight_dict["loss_cecls"] = args.cls_loss_coef
     if args.masks:
         weight_dict["loss_mask"] = args.mask_loss_coef
         weight_dict["loss_dice"] = args.dice_loss_coef
