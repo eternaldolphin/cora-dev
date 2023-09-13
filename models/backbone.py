@@ -198,7 +198,7 @@ def build_backbone(args):
     return_interm_layers = args.masks or args.multiscale
     if args.backbone_feature == 'layer4':
         feature_layer = 'layer4'
-    elif args.anchor_pre_matching or args.post_matching:
+    elif args.anchor_pre_matching:
         feature_layer = 'layer34'
     else:
         feature_layer = 'layer3'

@@ -37,6 +37,19 @@ import torchvision
 from models.attention import multi_head_attention_forward_trans as MHA_woproj
 
 
+def l2_loss(input, target):
+    """
+    very similar to the smooth_l1_loss from pytorch, but with
+    the extra beta parameter
+    """
+    pos_inds = torch.nonzero(target > 0.0).squeeze(1)
+    if pos_inds.shape[0] > 0:
+        cond = torch.abs(input[pos_inds] - target[pos_inds])
+        loss = 0.5 * cond**2 / pos_inds.shape[0]
+    else:
+        loss = input * 0.0
+    return loss.sum()
+
 class FastDETR(nn.Module):
     def __init__(self, args, backbone, transformer, classifier, num_classes):
         """ Initializes the model.
@@ -105,18 +118,15 @@ class FastDETR(nn.Module):
 
         # self.class_embed = nn.Linear(self.hidden_dim, num_classes)
         self.bbox_embed = MLP(self.hidden_dim, self.hidden_dim, 4, 3)
+        self.iou_embed = nn.Linear(self.hidden_dim, 1)
 
         # init prior_prob setting for focal loss
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
-        if self.args.end2end:
-            self.image_proj = nn.Linear(self.hidden_dim, self.classifier.text_projection.data.size(1))
-            self.class_bias = nn.Parameter(torch.ones([]) * bias_value)
-            self.tau = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-        else:
-            self.objectness_embed = nn.Linear(self.hidden_dim, 1)
-            if not self.args.disable_init:
-                nn.init.constant_(self.objectness_embed.bias, bias_value)
+        self.objectness_embed = nn.Linear(self.hidden_dim, 1)
+        if not self.args.disable_init:
+            nn.init.constant_(self.objectness_embed.bias, bias_value)
+        self.iou_embed.bias.data = torch.ones(1) * bias_value
 
         if self.args.rpn:
             self.stage1_box_embed = MLP(self.hidden_dim, self.hidden_dim, 4, 3)
@@ -290,14 +300,6 @@ class FastDETR(nn.Module):
                     query_features = F.one_hot(used_classes_, num_classes=text_feature.size(0)).to(text_feature.dtype) @ projected_text
             return classes_, query_features, query, confidences
 
-        if not self.args.anchor_pre_matching and self.args.post_matching:
-            if split_class:
-                query = query.repeat(1, 2, 1)
-                ori_bs = len(sizes)
-                sizes = [*sizes, *sizes]
-                for k in features.keys():
-                    features[k].tensors = features[k].tensors.repeat(2, 1, 1, 1)
-                    features[k].mask = features[k].mask.repeat(2, 1, 1)
         if not self.args.rpn:
             classes_, query_features, query, confidences = get_query_and_mask(query)
         else:
@@ -325,6 +327,7 @@ class FastDETR(nn.Module):
             outputs_coords.append(outputs_coord)
         outputs_coords = torch.stack(outputs_coords)
         objectness_score = self.objectness_embed(hs)
+        outputs_iou = self.iou_embed(hs)
 
         roi_feats = []
         if not self.training:
@@ -348,36 +351,7 @@ class FastDETR(nn.Module):
             roi_features = roi_feats[-1]
             roi_feats = torch.stack(roi_feats)
 
-        out = {'pred_logits': objectness_score[-1], 'pred_boxes': outputs_coords[-1]}
-
-        if self.args.post_matching:
-            
-            src_feature = features['layer4']
-            sizes = [((1 - m[0].float()).sum(), (1 - m[:,0].float()).sum()) for m in src_feature.decompose()[1]]
-            box_emb = None
-            roi_features = []
-            with torch.no_grad():
-                text_feature = self.classifier(categories)
-                for outputs_coord in outputs_coords:
-                    roi_feature = self._sample_feature(sizes, outputs_coord, src_feature.tensors, extra_conv=False, box_emb=box_emb)
-                    # roi_feature = self._sample_feature(sizes, outputs_coords.transpose(1,0).flatten(1,2), src_feature.tensors, extra_conv=False, box_emb=box_emb)
-                    roi_features.append(roi_feature)
-            roi_features = torch.stack(roi_features)
-            # roi_features = roi_features.unflatten(1, (6, 1000)).transpose(0, 1)# [2, 6000, 1024]->[6, 2, 1000, 1024]
-            eda_class = roi_features @ text_feature.t()# [6, 2, 1000, 48]
-            out['eda_logits'] = eda_class[-1]
-            if split_class:
-                split_mask = torch.rand_like(text_feature[:,0]) > 0.5
-                text_feature1 = text_feature.clone()
-                text_feature2 = text_feature.clone()
-                text_feature1[split_mask] = 0.0
-                text_feature2[~split_mask] = 0.0
-                outputs_class1 = roi_features @ text_feature1.t()
-                outputs_class2 = roi_features @ text_feature2.t()
-                import ipdb;ipdb.set_trace()
-                eda_class = torch.cat([outputs_class1, outputs_class2])
-                
-            classes_ = eda_class.max(-1)[1]
+        out = {'pred_logits': objectness_score[-1], 'pred_boxes': outputs_coords[-1], 'pred_logits_iou':outputs_iou[-1]}
 
         if query is not None:
             out['proposal'] = query.sigmoid()
@@ -392,14 +366,8 @@ class FastDETR(nn.Module):
             
                 
         if self.aux_loss:
-            out['aux_outputs'] = self._set_aux_loss(objectness_score, outputs_coords)
+            out['aux_outputs'] = self._set_aux_loss(objectness_score, outputs_coords, outputs_iou)
 
-        if self.args.post_matching:
-            out['proposal_classes'] = classes_[-1]
-            if self.aux_loss:
-                for temp, eda_class, class_ in zip(out["aux_outputs"], eda_class[:-1], classes_[:-1]):
-                    temp['eda_logits'] = eda_class
-                    temp['proposal_classes'] = class_
 
         if self.args.remove_misclassified and self.args.anchor_pre_matching:
             out['proposal_classes'] = classes_
@@ -426,8 +394,6 @@ class FastDETR(nn.Module):
             objectness_score[-1] = iou_objectness
 
         if not self.training:
-            if self.args.post_matching:
-                roi_features = roi_features[-1]
             # the text feature
             text_feature = self.classifier(categories)
             outputs_class = roi_features @ text_feature.t()
@@ -550,12 +516,12 @@ class FastDETR(nn.Module):
         return roi_features
 
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outputs_coords):
+    def _set_aux_loss(self, outputs_class, outputs_coords, outputs_iou):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
-        return [{'pred_logits': a, 'pred_boxes': b}
-                for a, b in zip(outputs_class[:-1], outputs_coords[:-1])]
+        return [{'pred_logits': a, 'pred_boxes': b, 'pred_logits_iou':c}
+                for a, b, c in zip(outputs_class[:-1], outputs_coords[:-1], outputs_iou[:-1])]
 
 
 class SetCriterion(nn.Module):
@@ -668,6 +634,26 @@ class SetCriterion(nn.Module):
         losses['loss_giou'] = loss_giou.sum() / num_boxes
         return losses
 
+    def loss_ious(self, outputs, targets, indices, num_boxes):
+        """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
+           targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
+           The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
+        """
+        assert 'pred_logits_iou' in outputs
+        idx = self._get_src_permutation_idx(indices)
+        src_boxes = outputs['pred_boxes'][idx]
+        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        
+        target_iou = box_ops.box_iou_pairwise(box_ops.box_cxcywh_to_xyxy(src_boxes).clamp(min=0,max=1),box_ops.box_cxcywh_to_xyxy(target_boxes))[0].detach()
+        src_logits_iou = outputs['pred_logits_iou'][idx].sigmoid().flatten()
+        
+        loss_iou = l2_loss(src_logits_iou, target_iou)
+
+        losses = {}
+        losses['loss_iou'] = loss_iou
+
+        return losses
+
     def loss_masks(self, outputs, targets, indices, num_boxes):
         """Compute the losses related to the masks: the focal loss and the dice loss.
            targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
@@ -713,10 +699,9 @@ class SetCriterion(nn.Module):
             'labels': self.loss_labels,
             'cardinality': self.loss_cardinality,
             'boxes': self.loss_boxes,
-            'masks': self.loss_masks
+            'masks': self.loss_masks,
+            'ious':self.loss_ious,
         }
-        if self.args.post_matching:
-            loss_map['eda'] = self.loss_eda
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
 
@@ -796,6 +781,7 @@ class PostProcess(nn.Module):
             self.max_det = 300
         else:
             self.max_det = 100
+        self.args = args
 
     @torch.no_grad()
     def forward(self, outputs, target_sizes):
@@ -806,7 +792,7 @@ class PostProcess(nn.Module):
                           For evaluation, this must be the original image size (before any data augmentation)
                           For visualization, this should be the image size after data augment, but before padding
         """
-        out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
+        out_logits, out_bbox, out_iou = outputs['pred_logits'], outputs['pred_boxes'], outputs['pred_logits_iou']
 
         assert len(out_logits) == len(target_sizes)
         assert target_sizes.shape[1] == 2
@@ -846,6 +832,9 @@ class PostProcess(nn.Module):
                 boxes.append(coords)
         else:
             prob = out_logits.sigmoid()
+            import ipdb;ipdb.set_trace()
+            iou = out_iou.sigmoid().repeat(1,1,prob.shape[-1])
+            prob = prob * iou
             topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), 100, dim=1)
             scores = topk_values
             topk_boxes = topk_indexes // out_logits.shape[2]
@@ -891,9 +880,9 @@ def build(args):
         'loss_ce': args.cls_loss_coef,
         'loss_bbox': args.bbox_loss_coef,
         'loss_giou': args.giou_loss_coef,
-        'loss_eda': args.cls_loss_coef,
+        'loss_iou': args.giou_loss_coef,
     }
-    losses = ['labels', 'boxes', 'cardinality']
+    losses = ['labels', 'boxes', 'cardinality', 'ious']
     if args.masks:
         weight_dict["loss_mask"] = args.mask_loss_coef
         weight_dict["loss_dice"] = args.dice_loss_coef
@@ -910,8 +899,6 @@ def build(args):
 
     if args.masks:
         losses += ["masks"]
-    if args.post_matching:
-        losses += ["eda"]
     
     criterion = SetCriterion(num_classes,
                             matcher=matcher,

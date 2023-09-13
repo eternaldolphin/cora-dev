@@ -172,7 +172,6 @@ def get_args_parser():
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
     parser.add_argument('--celoss', action='store_true')
-    parser.add_argument('--post_matching', action='store_true')
 
     return parser
 
