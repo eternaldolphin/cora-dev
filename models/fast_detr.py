@@ -785,6 +785,8 @@ class SetCriterion(nn.Module):
                 losses.update(l_dict)
 
         return losses
+    
+    
 class PostProcess(nn.Module):
     """ This module converts the model's output into the format expected by the coco api"""
 
@@ -824,13 +826,21 @@ class PostProcess(nn.Module):
                     class_logit = class_logit[valid_mask]
 
                 coords = coords.unsqueeze(1)
-                filter_mask = class_logit > score_threshold
-                filter_inds = filter_mask.nonzero()
-                coords = coords[filter_inds[:, 0], 0]
-                scores_ = class_logit[filter_mask]
-                keep = batched_nms(coords, scores_, filter_inds[:, 1], nms_thres)
-                keep = keep[:self.max_det]
-                coords, scores_, filter_inds = coords[keep], scores_[keep], filter_inds[keep]
+                filter_mask = class_logit > score_threshold # [1000, 65]
+                filter_inds = filter_mask.nonzero()# [25564, 2] 1:proposal 2:class
+                coords = coords[filter_inds[:, 0], 0]# [1000, 1, 4] -> [25564, 4]
+                scores_ = class_logit[filter_mask]# [25564]
+                keep = batched_nms(coords, scores_, filter_inds[:, 1], nms_thres)#[25564, 4] [25564] [25564] 0.5
+                if self.args.post_thresh:
+                    coords, scores_, filter_inds = coords[keep], scores_[keep], filter_inds[keep]# [100, 4] [100] [100, 2]
+                    # import ipdb;ipdb.set_trace()
+                    # post_thresh = 0.0041 # 1sigma
+                    post_thresh = 0.0019 # 1sigma
+                    keep_thresh = scores_ > post_thresh
+                    coords, scores_, filter_inds = coords[keep_thresh], scores_[keep_thresh], filter_inds[keep_thresh]# [100, 4] [100] [100, 2]
+                else:
+                    keep = keep[:self.max_det]# [100]
+                    coords, scores_, filter_inds = coords[keep], scores_[keep], filter_inds[keep]# [100, 4] [100] [100, 2]
                 scores.append(scores_)
                 labels.append(filter_inds[:, 1])
                 boxes.append(coords)

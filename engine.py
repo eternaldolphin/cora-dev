@@ -163,7 +163,7 @@ def train_one_epoch(model: torch.nn.Module,
         
         _cnt += 1
         if args.debug:
-            if _cnt % (15) == 0:
+            if _cnt % (10) == 0:
                 print("BREAK!"*5)
                 break
 
@@ -193,7 +193,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         iou_types = ['bbox']
     else:
         iou_types = tuple(k for k in ('segm', 'bbox') if k in postprocessors.keys())
-        coco_evaluator = CocoEvaluator(base_ds, iou_types, label2cat=data_loader.dataset.label2catid)
+        coco_evaluator = CocoEvaluator(base_ds, iou_types, label2cat=data_loader.dataset.label2catid, args=args)
 
         panoptic_evaluator = None
         if 'panoptic' in postprocessors.keys():
@@ -207,6 +207,14 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         print_freq = 10
     else:
         print_freq = 100
+
+    # target_index = [4, 5, 11, 12, 15, 16, 21, 23, 27, 29, 32, 34, 45, 47, 54, 58, 63]
+    # score_dict = {}
+    # score_100 = []
+    # score_300 = []
+    # for target_id in target_index:
+    #     score_dict[target_id] = []
+
     _cnt = 0
     for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
         samples = samples.to(device)
@@ -252,6 +260,16 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
                 scaler = torch.tensor([w, h, w, h], device=gt_boxes.device).unsqueeze(0)
                 out['boxes'] = gt_boxes * scaler
                 results.append(out)
+        
+        # for result in results:
+        #     labels = result['labels']
+        #     scores = result['scores']
+        #     score_100.append(scores[99])
+        #     score_300.append(scores[299])
+        #     for i, label in enumerate(labels):
+        #         if int(label) in target_index:
+        #             score_dict[int(label)].append(round(float(scores[i]), 4))
+        
 
         if args.dataset_file == 'lvis':
             for target, output in zip(targets, results):
@@ -335,9 +353,26 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             
         _cnt += 1
         if args.debug:
-            if _cnt % (15) == 0:
+            if _cnt % (10) == 0:
                 print("BREAK!"*5)
                 break
+
+    # stat_category = {}
+    # for label in target_index:
+    #     data = score_dict[label]
+    #     print(data_loader.dataset.category_list[label], ': ', len(data), max(data), round(np.mean(data),4))
+    #     if len(data)==0: stat_category[label] = (0, 0, 0)
+    #     else:
+    #         mean = np.mean(data)
+    #         std = np.std(data)
+    #         stat_category[label] = (len(data), round(mean, 4), round(std, 4))
+    # import pickle
+    # # import ipdb;ipdb.set_trace()
+    # with open("score_novelall_{}.pickle".format(outputs['pred_logits'].device.index), "wb") as file: pickle.dump(score_dict, file)
+    # with open("score_100_{}.pickle".format(outputs['pred_logits'].device.index), "wb") as file: pickle.dump(score_100, file)
+    # with open("score_300_{}.pickle".format(outputs['pred_logits'].device.index), "wb") as file: pickle.dump(score_300, file)
+
+    # with open("statistic.pickle", "wb") as file: pickle.dump(stat_category, file)
 
     if args.dataset_file == 'lvis':
         rank = utils.get_rank()
@@ -478,7 +513,7 @@ def lvis_evaluate(
 
         _cnt += 1
         if args.debug:
-            if _cnt % 15 == 0:
+            if _cnt % 10 == 0:
                 print("BREAK!"*5)
                 break
 

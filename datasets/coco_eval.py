@@ -24,7 +24,7 @@ from util.misc import all_gather
 
 
 class CocoEvaluator(object):
-    def __init__(self, coco_gt, iou_types, label2cat=None):
+    def __init__(self, coco_gt, iou_types, label2cat=None, args=None):
         assert isinstance(iou_types, (list, tuple))
         coco_gt = copy.deepcopy(coco_gt)
         self.coco_gt = coco_gt
@@ -43,6 +43,7 @@ class CocoEvaluator(object):
 
         self.img_ids = []
         self.eval_imgs = {k: [] for k in iou_types}
+        self.args = args
 
     def update(self, predictions):
         img_ids = list(np.unique(list(predictions.keys())))
@@ -78,42 +79,68 @@ class CocoEvaluator(object):
             coco_eval.summarize()
             
             precisions = self.coco_eval[iou_type].eval["precision"]
-
-            results_seen = []
-            results_unseen = []
-            for idx in range(precisions.shape[-3]):
-                # area range index 0: all area ranges
-                # max dets index -1: typically 100 per image
-                precision = precisions[0, :, idx, 0, -1]
-                precision = precision[precision > -1]
-                if precision.size:
-                    ap = np.mean(precision)
-                    # print(f"AP {idx}: {ap}")
-                    if self.label2catid[idx] in self.base_catids:
-                        results_seen.append(float(ap * 100))
-                    elif self.label2catid[idx] in self.target_catids:
-                        results_unseen.append(float(ap * 100))
-            print(f"{iou_type} AP base: {np.mean(results_seen)}")
-            print(f"{iou_type} AP target: {np.mean(results_unseen)}")
-
             recalls = self.coco_eval[iou_type].eval['recall']
-            recalls_seen = []
-            recalls_unseen = []
-            for idx in range(recalls.shape[-3]):
-                # area range index 0: all area ranges
-                # max dets index -1: typically 100 per image
-                recall = recalls[0, idx, 0, -1]
-                recall = recall[recall > -1]
-                if recall.size:
-                    ar = np.mean(recall)
-                    if self.label2catid[idx] in self.base_catids:
-                        recalls_seen.append(float(ar * 100))
-                    elif self.label2catid[idx] in self.target_catids:
-                        recalls_unseen.append(float(ar * 100))
-            print(f"{iou_type} AR base: {np.mean(recalls_seen)}")
-            print(f"{iou_type} AR target: {np.mean(recalls_unseen)}")
 
-            coco_eval.stats = np.concatenate([coco_eval.stats, np.mean(results_seen)[None], np.mean(results_unseen)[None], np.mean(recalls_seen)[None], np.mean(recalls_unseen)[None]])
+            weighted = [False, True]
+            if self.args.poolap:
+                for is_weight in weighted:
+                    w_idx = 0 if is_weight==True else 2     
+                    novel_precision = precisions[0, :, 0+w_idx, 0, -1]
+                    novel_ap = np.mean(novel_precision)
+                    novel_ap = float(novel_ap * 100)
+                    novel_recall = recalls[0, 0+w_idx, 0, -1]
+                    novel_ar = np.mean(novel_recall)
+                    novel_ar = float(novel_ar * 100)
+                    # 
+                    base_precision = precisions[0, :, 1+w_idx, 0, -1]
+                    base_ap = np.mean(base_precision)
+                    base_ap = float(base_ap * 100)
+                    base_recall = recalls[0, 1+w_idx, 0, -1]
+                    base_ar = np.mean(base_recall)
+                    base_ar = float(base_ar * 100)
+
+                    print(f"balance={is_weight} {iou_type} AP base: {base_ap}")
+                    print(f"balance={is_weight} {iou_type} AP target: {novel_ap}")
+                    print(f"balance={is_weight} {iou_type} AR base: {base_ar}")
+                    print(f"balance={is_weight} {iou_type} AR target: {novel_ar}")
+                coco_eval.stats = np.concatenate([coco_eval.stats, np.array(base_ap)[None], 
+                np.array(novel_ap)[None], np.array(base_ar)[None], np.array(novel_ar)[None]])
+
+            else:
+                results_seen = []
+                results_unseen = []
+                for idx in range(precisions.shape[-3]):
+                    # area range index 0: all area ranges
+                    # max dets index -1: typically 100 per image
+                    precision = precisions[0, :, idx, 0, -1]
+                    precision = precision[precision > -1]
+                    if precision.size:
+                        ap = np.mean(precision)
+                        # print(f"AP {idx}: {ap}")
+                        if self.label2catid[idx] in self.base_catids:
+                            results_seen.append(float(ap * 100))
+                        elif self.label2catid[idx] in self.target_catids:
+                            results_unseen.append(float(ap * 100))
+                print(f"{iou_type} AP base: {np.mean(results_seen)}")
+                print(f"{iou_type} AP target: {np.mean(results_unseen)}")
+
+                
+                recalls_seen = []
+                recalls_unseen = []
+                for idx in range(recalls.shape[-3]):
+                    # area range index 0: all area ranges
+                    # max dets index -1: typically 100 per image
+                    recall = recalls[0, idx, 0, -1]
+                    recall = recall[recall > -1]
+                    if recall.size:
+                        ar = np.mean(recall)
+                        if self.label2catid[idx] in self.base_catids:
+                            recalls_seen.append(float(ar * 100))
+                        elif self.label2catid[idx] in self.target_catids:
+                            recalls_unseen.append(float(ar * 100))
+                print(f"{iou_type} AR base: {np.mean(recalls_seen)}")
+                print(f"{iou_type} AR target: {np.mean(recalls_unseen)}")
+                coco_eval.stats = np.concatenate([coco_eval.stats, np.mean(results_seen)[None], np.mean(results_unseen)[None], np.mean(recalls_seen)[None], np.mean(recalls_unseen)[None]])
             
 
     def prepare(self, predictions, iou_type):
@@ -272,6 +299,8 @@ def evaluate(self):
     if p.useCats:
         p.catIds = list(np.unique(p.catIds))
     p.maxDets = sorted(p.maxDets)
+    # p.maxDets = [100, 1000, 300]
+    # p.maxDets = [1000, 5000, 10000]
     self.params = p
 
     self._prepare()

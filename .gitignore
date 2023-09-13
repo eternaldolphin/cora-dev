@@ -148,3 +148,4 @@ COCO_RN50.pth
 configs
 COCO_RN50_fewshot.pth
 instructor_ovcoco.pth
+result_2gpu
