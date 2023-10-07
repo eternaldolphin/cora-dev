@@ -182,6 +182,12 @@ class Classifier(torch.nn.Module):
 
 def build_classifier(args):
     train_backbone = args.lr_language > 0
-    classifier = Classifier(args.backbone, train_backbone, token_len=args.text_len, 
-                            no_clip_init=args.no_clip_init or args.no_clip_init_text, use_adapter=args.text_adapter, use_prompt=args.text_prompt, adapter_dim=args.adapter_dim)
+    if args.pseudo_word or args.vallina_fc:
+        from InstructorEmbedding import INSTRUCTOR
+        classifier = INSTRUCTOR('hkunlp/instructor-base')
+        for v in classifier.parameters():
+            v.requires_grad_(False)
+    else:
+        classifier = Classifier(args.backbone, train_backbone, token_len=args.text_len, 
+                                no_clip_init=args.no_clip_init or args.no_clip_init_text, use_adapter=args.text_adapter, use_prompt=args.text_prompt, adapter_dim=args.adapter_dim)
     return classifier

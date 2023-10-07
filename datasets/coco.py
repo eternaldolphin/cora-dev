@@ -320,6 +320,10 @@ def build(image_set, args):
             "train": (root / "train2017", root / "annotations" / f'{mode}_train2017_base.json'),
             "val": (root / "val2017", root / "annotations" / f'{mode}_val2017_basetarget.json'),
         }
+        if args.vg:
+            PATHS["train"] = ("data/VisualGenome/images", "data/VisualGenome/metas/vg_instances_train.json")
+        if args.train_all:
+            PATHS["train"] = (root / "train2017", root / "annotations" / f'{mode}_train2017.json')
         if args.label_type == 'coco_nouns':
             PATHS['train'] = (root / "train2017", root / "annotations" / f'{mode}_train2017_base_coconouns.json')
         if args.label_type == 'tiny':

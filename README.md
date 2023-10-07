@@ -1,3 +1,15 @@
+### align clip roi features into pseudo words in t5 space 
+```shell
+# COCO RN50
+bash configs/instructor-embedding/COCO_RN50_T5_vg.sh exp_name1 4 local
+bash configs/instructor-embedding/COCO_RN50_T5_vg_base.sh exp_name2 4 local --resume logs/COCO_RN50_T5_vg/vg/checkpoint0004.pth
+
+#工程TODO: COCO RN50x4 
+bash configs/instructor-embedding/COCO_RN50x4_T5_vg.sh exp_name1 4 local
+bash configs/instructor-embedding/COCO_RN50x4_T5_vg_base.sh exp_name2 4 local --resume logs/COCO_RN50_T5_vg/vg/checkpoint0004.pth
+```
+
+
 ### Region Prompting
 ```shell
 # run the following commands for region prompting

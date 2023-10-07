@@ -1,3 +1,7 @@
 logs
-configs/*
+configs/COCO*
 **/__pycache__
+
+data/*
+data/refcoco/*
+**.pth

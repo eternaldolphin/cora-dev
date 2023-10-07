@@ -47,7 +47,12 @@ class FastDETR(nn.Module):
         self.backbone = backbone
         self.classifier = classifier
         self.tau = 100 # hard code 
-        
+        if self.args.pseudo_word:
+            # self.fc_cls = MLP(1024, 1024, 1024*4, 3)
+            self.fc_cls = MLP(1024, 768, 768*4, 3)
+        if self.args.vallina_fc:
+            self.fc_cls = MLP(1024, 768, 768, 3)
+
         if args.use_proposal:
             # Instead of modeling query_embed as learnable parameters in the shape of (num_queries, d_model),
             # we directly model reference boxes in the shape of (num_queries, 4), in the format of (xc yc w h).
@@ -110,7 +115,17 @@ class FastDETR(nn.Module):
             samples = nested_tensor_from_tensor_list(samples)
 
         features, pos_embeds = self.backbone(samples)
-        text_feature = self.classifier(categories)
+        if self.args.pseudo_word or self.args.vallina_fc:
+            if not hasattr(self, 'text_feature') or len(self.text_feature) != len(categories):
+                texts_with_instructions = []
+                for i, text in enumerate(categories):
+                    texts_with_instructions.append(["Represent the caption for retrieving duplicate captions:", text])
+                text_feature = self.classifier.encode(texts_with_instructions, convert_to_tensor=True)
+                self.register_buffer('text_feature', text_feature)
+            else:
+                text_feature = self.text_feature
+        else:
+            text_feature = self.classifier(categories)
         
         outputs = dict(
             features=features,

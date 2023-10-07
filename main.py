@@ -150,13 +150,19 @@ def get_args_parser():
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
+    parser.add_argument('--pseudo_word', action='store_true')
+    parser.add_argument('--train_all', action='store_true')
+    parser.add_argument('--vg', action='store_true')
+    parser.add_argument('--poc', action='store_true')
+    parser.add_argument('--vallina_fc', action='store_true')
 
     return parser
 
 
 def main(args):
     utils.init_distributed_mode(args)
-
+    if args.debug:
+        args.batch_size = 2
     if args.frozen_weights is not None:
         assert args.masks, "Frozen training is meant for segmentation only."
     print(args)
@@ -188,7 +194,10 @@ def main(args):
         for k, v in model.named_parameters():
             if match_keywords(k, prompt_names):
                 v.requires_grad = True
-
+    if args.pseudo_word and not args.vg:
+        for k, v in model.named_parameters():
+            if 'fc_cls' in k:
+                v.requires_grad = False
     model_without_ddp = model
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
@@ -282,7 +291,7 @@ def main(args):
             checkpoint = torch.hub.load_state_dict_from_url(args.resume, map_location='cpu', check_hash=True)
         else:
             checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'], strict=True)
+        model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
         if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])

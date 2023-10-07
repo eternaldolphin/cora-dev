@@ -26,6 +26,10 @@ if [ "$type" == 'local' ]; then
 
   header="python -m torch.distributed.launch --nproc_per_node=${gpu} --master_port 29898 --use_env main.py "
 
+elif [ "$type" == 'air' ]; then
+
+  header="python -m torch.distributed.launch --nproc_per_node=${gpu} --master_port 29398 --use_env main.py "
+
 else
 
   header="srun --async --partition=$partition -n${gpu} --mpi=pmi2 --gres=gpu:$gpu --ntasks-per-node=${gpu} --quotatype=$quotatype \

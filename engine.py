@@ -64,7 +64,10 @@ def train_one_epoch(model: torch.nn.Module,
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     # metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 100
+    if args.debug or utils.get_world_size() == 1:
+        print_freq = 10
+    else:
+        print_freq = 100
 
     _cnt = 0
     for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
@@ -84,7 +87,7 @@ def train_one_epoch(model: torch.nn.Module,
         outputs = model(samples, categories=categories + pseudo_categories)
         
         features, text_feature, tau = outputs['features'], outputs['text_feature'], outputs['tau']
-        
+
         if args.box_conditioned_pe:
             xywh_gt = torch.cat([target['boxes'] for target in targets])
             box_emb = gen_sineembed_for_position(xywh_gt.unsqueeze(0))[0]
@@ -109,7 +112,7 @@ def train_one_epoch(model: torch.nn.Module,
                 gt_boxes,
                 output_size=(reso, reso),
                 spatial_scale=1.0,
-                aligned=True)  # (bs * num_queries, c, 7, 7)
+                aligned=True)  # (bs * num_queries, c, 7, 7) [40, 1024, 14, 14]
         
             if 'module' in dir(model):
                 output_feats = model.module.backbone[0].attnpool(roi_features, box_emb)
@@ -126,7 +129,7 @@ def train_one_epoch(model: torch.nn.Module,
                 gt_boxes,
                 output_size=(reso, reso),
                 spatial_scale=1.0,
-                aligned=True)  # (bs * num_queries, c, 7, 7)
+                aligned=True)  # (bs * num_queries, c, 7, 7) [40, 1024, 14, 14]
         
             if 'module' in dir(model):
                 output_feats = model.module.backbone[0].layer4(roi_features)
@@ -135,8 +138,24 @@ def train_one_epoch(model: torch.nn.Module,
                 output_feats = model.backbone[0].layer4(roi_features)
                 output_feats = model.backbone[0].attnpool(output_feats, box_emb)
         output_feats = output_feats / output_feats.norm(dim=-1, keepdim=True)
-        logits = (output_feats @ text_feature.t()) * tau
-        
+
+        if args.pseudo_word:
+            pseudo_words = model.module.fc_cls(output_feats).view(-1, 4, 768)# [160, 1024]->[160, 3072]->[160, 4, 768]
+            pseudo_output_feats = model.module.classifier.encode_pseudo_word(pseudo_words, convert_to_tensor=True)# (160, 768)
+            logits = (pseudo_output_feats @ text_feature.t()) * tau# [50, 768] [48, 768]->[50, 48]
+        if args.vallina_fc:
+            pseudo_words = model.module.fc_cls(output_feats)# [160, 1024]->[160, 768]
+            logits = (pseudo_output_feats @ text_feature.t()) * tau# [50, 768] [48, 768]->[50, 48]
+        else:
+            logits = (output_feats @ text_feature.t()) * tau# [40, 1024]requires_grad=true (48, 768)requires_grad=false
+            if args.poc:
+                jaccard_logits = torch.zeros_like(logits)# [76, 65]
+                coco_reranking = torch.load('/home/JJ_Group/dph/IDOW/output/coco_rerank.pth')
+                for idx in range(len(coco_reranking)):
+                    softmax_jaccard = torch.nn.functional.softmax(coco_reranking[idx]['jaccard'], dim=0).unsqueeze(0).repeat(logits.shape[0], 1).to(logits.device)# [76, 32]
+                    softmax_logits = torch.gather(logits, 1, coco_reranking[idx]['index'].unsqueeze(0).repeat(logits.shape[0], 1).to(logits.device)) # [76, 32]
+                    jaccard_logits[:, idx] = (softmax_jaccard*softmax_logits).sum(dim=1)
+                logits = jaccard_logits 
         labels = torch.cat([target['labels'] for target in targets])
         
         if labels.numel() == 0:
@@ -195,7 +214,7 @@ def train_one_epoch(model: torch.nn.Module,
         
         _cnt += 1
         if args.debug:
-            if _cnt % 15 == 0:
+            if _cnt % 5 == 0:
                 print("BREAK!"*5)
                 break
 
@@ -237,10 +256,15 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
                     output_dir=os.path.join(output_dir, "panoptic_eval"),
                 )
 
-
-    print_freq = 100
+    if args.debug or utils.get_world_size() == 1:
+        print_freq = 10
+    else:
+        print_freq = 100
     _cnt = 0
     results = []
+
+    predictions = []
+    groundtruth = []
     for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
         samples = samples.to(device)
         targets = [{k: v if isinstance(v, (list, dict)) else v.to(device) for k, v in t.items()} for t in targets]
@@ -301,7 +325,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
                 boxes,
                 output_size=(reso, reso),
                 spatial_scale=1.0,
-                aligned=True)  # (bs * num_queries, c, 7, 7)
+                aligned=True)  # (bs * num_queries, c, 7, 7) [40, 1024, 14, 14]
         
             if 'module' in dir(model):
                 output_feats = model.module.backbone[0].layer4(roi_features)
@@ -310,7 +334,25 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
                 output_feats = model.backbone[0].layer4(roi_features)
                 output_feats = model.backbone[0].attnpool(output_feats, box_emb)
         output_feats = output_feats / output_feats.norm(dim=-1, keepdim=True)
-        logits = (output_feats @ text_feature.t()) * tau
+
+        if args.pseudo_word:
+            # pseudo_words = model.module.fc_cls(output_feats).view(-1, 4, 1024)# -> [35, 4, 1024]
+            pseudo_words = model.module.fc_cls(output_feats).view(-1, 4, 768)# -> [35, 4, 1024]
+            pseudo_output_feats = model.module.classifier.encode_pseudo_word(pseudo_words, convert_to_tensor=True)# (50, 768)
+            logits = (pseudo_output_feats @ text_feature.t()) * tau# [50, 768] [48, 768]->[50, 48]
+        if args.vallina_fc:
+            pseudo_words = model.module.fc_cls(output_feats)# [160, 1024]->[160, 768]
+            logits = (pseudo_output_feats @ text_feature.t()) * tau# [50, 768] [48, 768]->[50, 48]
+        else:
+            logits = (output_feats @ text_feature.t()) * tau
+            if args.poc:
+                jaccard_logits = torch.zeros_like(logits)# [76, 65]
+                coco_reranking = torch.load('/home/JJ_Group/dph/IDOW/output/coco_rerank.pth')
+                for idx in range(len(coco_reranking)):
+                    softmax_jaccard = torch.nn.functional.softmax(coco_reranking[idx]['jaccard']).unsqueeze(0).repeat(logits.shape[0], 1).to(logits.device)# [76, 32]
+                    softmax_logits = torch.gather(logits, 1, coco_reranking[idx]['index'].unsqueeze(0).repeat(logits.shape[0], 1).to(logits.device)) # [76, 32]
+                    jaccard_logits[:, idx] = (softmax_jaccard*softmax_logits).sum(dim=1)
+                logits = jaccard_logits
         
         labels = torch.cat([target['labels'] for target in targets])
         if args.export:
@@ -333,13 +375,18 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
 
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         # results = postprocessors['bbox'](outputs, orig_target_sizes)
-        
         # and from relative [0, 1] to absolute [0, height] coordinates
         img_h, img_w = orig_target_sizes.unbind(1)
         scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
         if args.dataset_file == 'coco':
             results = []
-        logits = logits.softmax(dim=-1)
+
+        # add macro weighted acc metric
+        logits = logits.softmax(dim=-1) 
+        pred = torch.argmax(logits, dim=-1)
+        predictions.extend(pred.tolist())
+        groundtruth.extend(labels.tolist())
+
         if args.dataset_file == 'lvis':
             for logit, box, scale, box_score, target in zip(logits.split(num_boxes), ori_boxes, scale_fct, box_scores, targets):
                 logit = logit * box_score
@@ -364,9 +411,9 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
                     results.append(temp)
         else:
             for logit, box, scale, box_score in zip(logits.split(num_boxes), ori_boxes, scale_fct, box_scores):
-                logit = logit * box_score
-                scores, indices = logit.flatten().topk(k=min(100, logit.numel()))
-                box_id = torch.div(indices, logit.size(1), rounding_mode='floor')
+                logit = logit * box_score# [18, 65]
+                scores, indices = logit.flatten().topk(k=min(100, logit.numel()))# [100] [100]
+                box_id = torch.div(indices, logit.size(1), rounding_mode='floor')# [100]
                 cls_id = indices % logit.size(1)
                 pred_boxes = box[box_id]
                 results.append(dict(
@@ -393,7 +440,7 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             
         _cnt += 1
         if args.debug:
-            if _cnt % 15 == 0:
+            if _cnt % 5 == 0:
                 print("BREAK!"*5)
                 break
 
@@ -401,7 +448,30 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         import json
         with open(f'logs/export_label_{utils.get_rank()}.json', 'w') as f:
             json.dump(label_map, f)
-            
+    
+    # add macro weighted acc metric
+    from sklearn.metrics import accuracy_score,confusion_matrix,precision_score
+    import torch.distributed as dist
+    from itertools import chain
+    rank = utils.get_rank()
+    torch.save(predictions, output_dir + f"/pred_{rank}.pth")
+    torch.save(groundtruth, output_dir + f"/gt_{rank}.pth")
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+    if rank == 0:
+        world_size = utils.get_world_size()
+        all_predictions = []
+        all_groundtruth = []
+        for i in range(1, world_size):
+            temp = torch.load(output_dir + f"/pred_{i}.pth")
+            temp1 = torch.load(output_dir + f"/gt_{i}.pth")
+            all_predictions.extend(temp)
+            all_groundtruth.extend(temp1)
+        macro_mAP = precision_score(all_groundtruth,all_predictions,average="macro")
+        weighted_mAP = precision_score(all_groundtruth,all_predictions,average="weighted")
+        acc = accuracy_score(all_groundtruth,all_predictions)
+        print(f"macro_mAP {macro_mAP * 100:.3f}", f"weighted_mAP {weighted_mAP * 100:.3f}", f"acc {acc * 100:.3f}")
+
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
