@@ -1,3 +1,4 @@
+## Reproducing CORA for communication and learning purposes only
 ## 实验细节
 `--target_class_factor 1` 大概能涨2个点
 
